@@ -19,5 +19,3 @@ Thumbs.db
 
 #无关文件
 .superpowers
-deploy-docker.ps1
-DOCKER_DESKTOP_DEPLOYMENT.md
