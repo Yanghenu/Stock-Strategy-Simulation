@@ -1,0 +1,23 @@
+# 本机配置与 Python 生成文件
+backend/config.ini
+backend/config.docker.ini
+backend/.venv/
+backend/**/__pycache__/
+backend/**/*.py[cod]
+*.log
+
+# Vue / Vite 依赖和构建产物
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# 编辑器与操作系统文件
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+#无关文件
+.superpowers
+deploy-docker.ps1
+DOCKER_DESKTOP_DEPLOYMENT.md

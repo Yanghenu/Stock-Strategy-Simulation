@@ -1,0 +1,484 @@
+/* 辅助文字统一放大，尤其是元数据、表格及移动端标签，降低阅读负担。 */
+:root {
+  font-family: 'Inter', 'Microsoft YaHei UI', 'Noto Sans SC', sans-serif;
+  color: #263630;
+  background: #f5f8f6;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  --surface: #ffffff;
+  --surface-raised: #f6f9f7;
+  --surface-muted: #f5f8f6;
+  --line: #dfe7e3;
+  --line-soft: rgba(70, 97, 85, .16);
+  --text: #263630;
+  --muted: #596b64;
+  --quiet: #788780;
+  --accent: #14805c;
+  --up: #14805c;
+  --down: #c54b43;
+  --mono: 'SFMono-Regular', 'Cascadia Code', 'Consolas', monospace;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; min-height: 100vh; background: #f5f8f6; }
+button, input { font: inherit; }
+button { color: inherit; }
+button:focus-visible, input:focus-visible { outline: 2px solid rgba(20, 128, 92, .8); outline-offset: 2px; }
+::selection { background: rgba(20, 128, 92, .18); }
+
+/* 全页采用明亮研究台配色；白色工作面与浅灰边界帮助区分信息层级。 */
+.app-shell { min-height: 100vh; background: radial-gradient(ellipse at 16% 0%, rgba(20, 128, 92, .05), transparent 34%), #f5f8f6; }
+.topbar { height: 76px; padding: 0 max(32px, calc((100vw - 1440px) / 2)); display: flex; align-items: center; border-bottom: 1px solid rgba(70, 97, 85, .14); background: rgba(255, 255, 255, .94); position: sticky; top: 0; z-index: 20; backdrop-filter: blur(16px); }
+.brand { display: flex; align-items: center; gap: 12px; color: var(--text); text-decoration: none; min-width: 225px; }
+.brand-mark { width: 26px; height: 26px; display: grid; grid-template-columns: 1fr 1fr; gap: 3px; transform: rotate(-45deg); }
+.brand-mark i { display: block; background: var(--accent); border-radius: 2px; opacity: .93; }
+.brand-mark i:nth-child(2), .brand-mark i:nth-child(3) { opacity: .52; }
+.brand-copy { display: grid; line-height: 1.1; gap: 5px; }
+.brand-copy b { font-size: 13px; letter-spacing: .16em; font-weight: 700; }
+.brand-copy small { color: var(--muted); font-size: 12px; letter-spacing: .04em; }
+.main-nav { height: 100%; display: flex; gap: 8px; align-items: stretch; margin: 0 auto; }
+.main-nav button { position: relative; border: 0; background: transparent; color: #596b64; padding: 0 22px; font-size: 14px; cursor: pointer; transition: color .18s ease; }
+.main-nav button span { color: #aab7b1; font: 12px var(--mono); margin-right: 9px; }
+.main-nav button:hover, .main-nav button.active { color: #25352f; }
+.main-nav button.active::after { position: absolute; height: 2px; content: ''; bottom: 0; left: 20px; right: 20px; background: var(--accent); box-shadow: 0 0 12px rgba(20, 128, 92, .45); }
+.main-nav button.active span { color: var(--accent); }
+.topbar-status { min-width: 225px; display: flex; align-items: center; justify-content: flex-end; gap: 9px; color: #53655e; font: 13px var(--mono); }
+.live-dot, .range-dot { width: 6px; height: 6px; display: inline-block; border-radius: 50%; background: var(--accent); box-shadow: 0 0 9px rgba(20, 128, 92, .65); }
+.status-divider { width: 1px; height: 13px; background: #d2ded8; margin: 0 5px; }
+.status-clock { color: #71817a; }
+.page-content { max-width: 1440px; padding: 52px 42px 28px; margin: 0 auto; }
+.page-heading { display: flex; justify-content: space-between; align-items: flex-end; gap: 30px; margin: 0 0 31px; }
+.eyebrow { display: flex; align-items: center; gap: 10px; color: #64746e; font: 12px var(--mono); letter-spacing: .12em; text-transform: uppercase; }
+.section-index { color: var(--accent); }
+.page-heading h1 { margin: 13px 0 10px; color: #1e2c28; font-size: clamp(34px, 4.3vw, 56px); letter-spacing: -.055em; line-height: 1.11; font-weight: 600; }
+.page-heading p { margin: 0; color: #53655e; font-size: 14px; letter-spacing: .015em; }
+.mobile-break { display: none; }
+.heading-tools { display: flex; align-items: center; gap: 10px; padding-bottom: 2px; }
+.stock-search { width: min(340px, 30vw); position: relative; z-index: 5; }
+.search-field { height: 42px; display: flex; align-items: center; gap: 10px; padding: 0 12px; border: 1px solid #d5e0db; border-radius: 5px; background: rgba(255, 255, 255, .96); transition: border-color .2s, box-shadow .2s; }
+.search-field:focus-within { border-color: rgba(20, 128, 92, .62); box-shadow: 0 0 0 3px rgba(20, 128, 92, .08); }
+.search-glyph { color: #64746e; font-size: 21px; line-height: 1; transform: rotate(-20deg); }
+.search-field input { min-width: 0; flex: 1; border: 0; outline: 0; background: transparent; color: var(--text); font-size: 13px; }
+.search-field input::placeholder { color: #687870; }
+.search-hint { padding: 3px 6px; border: 1px solid #d2ded8; border-radius: 3px; color: #6c7d76; font: 11px var(--mono); }
+.search-results { position: absolute; left: 0; right: 0; top: 48px; overflow: hidden; padding: 4px; border: 1px solid #d2ded8; border-radius: 5px; background: #ffffff; box-shadow: 0 18px 40px rgba(28, 50, 40, .12); }
+.search-result { width: 100%; display: flex; align-items: center; gap: 11px; padding: 10px; border: 0; border-radius: 3px; background: transparent; text-align: left; cursor: pointer; }
+.search-result:hover { background: #edf4f0; }
+.result-symbol { color: var(--accent); font: 13px var(--mono); }
+.result-name { flex: 1; color: #34443d; font-size: 13px; }
+.result-price { color: #283831; font: 13px var(--mono); }
+.search-empty { padding: 12px 10px; color: var(--muted); font-size: 13px; }
+.icon-button, .secondary-button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; height: 42px; padding: 0 14px; border: 1px solid #d8e2dd; border-radius: 5px; background: #ffffff; color: #495b54; font-size: 13px; cursor: pointer; transition: border-color .18s, color .18s, background .18s; }
+.icon-button:hover, .secondary-button:hover { border-color: #76ad94; color: var(--accent); background: #edf5f1; }
+.icon-button:disabled, .secondary-button:disabled { cursor: wait; opacity: .7; }
+.refresh-button > span:first-child, .secondary-button > span { display: inline-block; color: var(--accent); font-size: 19px; line-height: 1; }
+.rotating { animation: rotate .9s linear infinite; }
+@keyframes rotate { to { transform: rotate(360deg); } }
+
+/* 行情快照把价格变化与成交统计分组，避免数字密集时互相争抢焦点。 */
+.quote-card { display: grid; grid-template-columns: minmax(310px, .92fr) 1.4fr; align-items: center; gap: 28px; min-height: 174px; margin-bottom: 18px; padding: 25px 30px; border: 1px solid #d8e2dd; border-radius: 7px; background: linear-gradient(115deg, rgba(237, 247, 241, .96), rgba(255, 255, 255, .99) 52%, rgba(255, 255, 255, .99)); box-shadow: inset 0 1px rgba(33, 63, 48, .035); }
+.quote-main { padding-right: 12px; }
+.quote-name-line { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.watch-action { flex: none; height: 32px; padding: 0 10px; border: 1px solid #a8cdb8; border-radius: 4px; background: #f4faf6; color: #176c4d; font-size: 12px; cursor: pointer; }
+.watch-action:hover, .watch-action.is-following { border-color: #78ad93; background: #eaf4ee; }
+.watch-action:disabled { cursor: wait; opacity: .65; }
+.quote-name-line h2 { margin: 7px 0 0; font-size: 20px; font-weight: 600; letter-spacing: -.025em; }
+.freshness { display: inline-flex; align-items: center; gap: 7px; color: #1a7253; font: 12px var(--mono); white-space: nowrap; }
+.freshness i { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); }
+.freshness.is-stale { color: #8a642e; }
+.freshness.is-stale i { background: #8a642e; }
+.quote-value-line { display: flex; align-items: center; gap: 14px; margin: 15px 0 6px; }
+.quote-value-line strong { font: 500 38px var(--mono); letter-spacing: -.07em; }
+.up { color: var(--up) !important; }
+.down { color: var(--down) !important; }
+.change-chip { display: inline-flex; flex-direction: column; gap: 2px; padding: 5px 8px; border: 1px solid currentColor; border-radius: 3px; background: rgba(20, 128, 92, .055); font: 12px var(--mono); }
+.change-chip span { font-size: 13px; }
+.change-chip.down { background: rgba(197, 75, 67, .06); }
+.quote-meta { color: #5c6d66; font: 12px var(--mono); }
+.quote-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 19px 22px; padding-left: 28px; border-left: 1px solid rgba(70, 97, 85, .17); }
+.quote-stats div { display: grid; gap: 6px; }
+.quote-stats span { color: #61716a; font-size: 12px; }
+.quote-stats b { color: #31413b; font: 13px var(--mono); font-weight: 500; }
+.quote-stats small { color: #5a6b63; font-size: 11px; }
+.quote-placeholder { display: flex; align-items: center; gap: 13px; min-height: 108px; padding: 24px; border: 1px dashed #d5e0db; border-radius: 6px; color: #586a63; font-size: 13px; margin-bottom: 18px; }
+.placeholder-mark { color: var(--accent); font-size: 23px; }
+
+.panel { border: 1px solid #dce5e1; border-radius: 6px; background: linear-gradient(145deg, rgba(255, 255, 255, .98), rgba(248, 251, 249, .98)); box-shadow: 0 10px 32px rgba(28, 50, 40, .04); }
+.chart-panel { padding: 19px 22px 13px; }
+.panel-heading { min-height: 40px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.panel-heading h3 { margin: 5px 0 0; color: #293a34; font-size: 15px; font-weight: 600; letter-spacing: -.015em; }
+.chart-range { display: flex; align-items: center; gap: 8px; color: #53655e; font: 12px var(--mono); }
+/* 分时图紧贴实时报价卡，移动端缩短图表高度并限制错误提示宽度。 */
+.intraday-panel { margin-bottom: 16px; }
+.intraday-warning { max-width: 310px; overflow: hidden; color: #a94439; font: 11px 'Noto Sans SC', sans-serif; text-overflow: ellipsis; white-space: nowrap; }
+.intraday-chart-wrap { height: 320px; margin-top: 13px; position: relative; }
+.intraday-chart { height: 100%; }
+.range-dot { width: 5px; height: 5px; }
+.range-separator { width: 1px; height: 12px; margin: 0 2px; background: #d2ded8; }
+.market-chart-wrap { height: 365px; margin-top: 13px; position: relative; }
+.chart-host { width: 100%; }
+.market-chart { height: 100%; }
+.chart-overlay { position: absolute; inset: 0; z-index: 1; display: flex; align-items: center; justify-content: center; gap: 10px; color: #64746e; font-size: 13px; pointer-events: none; }
+.spinner { width: 16px; height: 16px; border: 2px solid #d2ded8; border-top-color: var(--accent); border-radius: 50%; animation: rotate .7s linear infinite; }
+.spinner.small { width: 13px; height: 13px; border-width: 1.5px; }
+.chart-footnote { display: flex; justify-content: space-between; padding: 7px 2px 0; border-top: 1px solid rgba(70, 97, 85, .09); color: #6c7c75; font: 11px var(--mono); }
+.market-lower-grid { display: grid; grid-template-columns: 1.08fr .92fr; gap: 16px; margin-top: 16px; }
+.compact-panel { min-height: 145px; padding: 17px 20px 13px; }
+.count-pill { min-width: 28px; padding: 4px 7px; border: 1px solid #d2ded8; border-radius: 3px; color: #596d65; text-align: center; font: 11px var(--mono); }
+/* 关注列表行以整行股票按钮承载查询，右侧单独提供移除操作。 */
+.watch-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; padding: 0 4px; border-top: 1px solid var(--line-soft); }
+.watch-row.is-selected { background: #f2f7f4; }
+.watch-select { min-width: 0; flex: 1; display: flex; align-items: center; gap: 12px; padding: 10px 0; border: 0; background: transparent; text-align: left; cursor: pointer; }
+.watch-select:hover .watch-symbol { color: #176c4d; }
+.watch-select:focus-visible, .watch-remove:focus-visible { outline: 2px solid #78ad93; outline-offset: 2px; }
+.watch-symbol { color: var(--accent); font: 13px var(--mono); }
+.watch-name { flex: 1; color: #34443d; font-size: 13px; }
+.watch-row b { font: 13px var(--mono); }
+.watch-open-label { color: #718078; font-size: 12px; }
+.watch-remove { width: 28px; height: 28px; border: 1px solid transparent; border-radius: 4px; background: transparent; color: #819088; font-size: 18px; cursor: pointer; }
+.watch-remove:hover { border-color: #e2c4c0; color: #a94439; background: #fff7f6; }
+.watch-remove:disabled { cursor: wait; opacity: .55; }
+.panel-note { padding-top: 8px; border-top: 1px solid var(--line-soft); color: #6c7c75; font-size: 11px; }
+.small-empty { padding: 18px 0; color: #5a6b63; font-size: 13px; }
+.watchlist-error { margin: 8px 0; color: #a94439; font-size: 12px; }
+.market-note-panel h3 { margin: 11px 0 7px; font-size: 14px; font-weight: 500; }
+.market-note-panel p { max-width: 420px; margin: 0; color: #596b64; font-size: 13px; line-height: 1.65; }
+.note-line { display: flex; justify-content: space-between; margin-top: 13px; padding-top: 9px; border-top: 1px solid var(--line-soft); color: #63736c; font-size: 12px; }
+.note-line b { color: #54655e; font: 12px var(--mono); font-weight: 400; }
+
+/* 回测配置和结果区在桌面端并排，在手机端改为纵向阅读。 */
+.strategy-stamp { display: grid; gap: 7px; min-width: 172px; padding: 13px 15px; border-left: 2px solid #16805c; background: linear-gradient(90deg, rgba(20, 128, 92, .08), transparent); }
+.strategy-stamp span, .strategy-stamp small { color: #61716a; font: 11px var(--mono); letter-spacing: .12em; }
+.strategy-stamp b { color: #40564d; font: 13px var(--mono); letter-spacing: .08em; }
+.backtest-layout { display: grid; grid-template-columns: 345px minmax(0, 1fr); align-items: start; gap: 17px; }
+.form-panel { padding: 19px 20px 20px; }
+.form-heading { margin-bottom: 12px; }
+.required-mark { color: #687870; font-size: 11px; }
+.backtest-form { display: grid; gap: 14px; }
+.form-section-label { display: flex; align-items: center; gap: 9px; margin-top: 7px; padding-bottom: 8px; border-bottom: 1px solid rgba(70, 97, 85, .14); color: #34443d; font-size: 13px; font-weight: 600; }
+.form-section-label span { color: var(--accent); font: 11px var(--mono); }
+.form-field { min-width: 0; display: grid; gap: 7px; color: #5e6f68; font-size: 12px; }
+.form-field > input, .input-combo, .number-field { height: 37px; border: 1px solid #d5e0db; border-radius: 4px; background: #ffffff; color: #293a34; transition: border .18s; }
+.form-field > input, .number-field input { width: 100%; min-width: 0; height: 100%; padding: 0 10px; border: 0; outline: 0; background: transparent; color: #293a34; font: 13px var(--mono); }
+.form-field > input:focus, .number-field:focus-within, .input-combo:focus-within { border-color: rgba(20, 128, 92, .62); }
+.form-field input[type='date'] { color-scheme: light; }
+.input-combo { display: flex; align-items: center; padding-right: 10px; }
+.input-combo input { flex: 1; width: 45%; height: 100%; padding: 0 10px; border: 0; outline: 0; background: transparent; color: #293a34; font: 13px var(--mono); }
+.input-combo span { overflow: hidden; max-width: 125px; color: #61716a; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 11px; }
+/* 回测参数复用策略目录，组合代码和不同数量的参数保持清楚的两列布局。 */
+.backtest-strategy-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 11px; }
+.backtest-strategy-select, .backtest-symbols-input { width: 100%; border: 1px solid #d5e0db; border-radius: 4px; background: #fff; color: #293a34; font: inherit; font-size: 13px; }
+.backtest-strategy-select { height: 37px; padding: 0 10px; }
+.backtest-symbols-input { min-height: 74px; padding: 9px 10px; resize: vertical; line-height: 1.5; }
+.backtest-strategy-select:focus, .backtest-symbols-input:focus { outline: 0; border-color: rgba(20, 128, 92, .62); }
+.backtest-strategy-description { margin: 0; color: #65756e; font-size: 13px; line-height: 1.5; }
+.number-field { display: flex; align-items: center; }
+.number-field input { appearance: textfield; }
+.number-field input::-webkit-outer-spin-button, .number-field input::-webkit-inner-spin-button { margin: 0; appearance: none; }
+.number-field small { padding: 0 9px; color: #64746e; font: 11px var(--mono); white-space: nowrap; }
+.number-field.prefix small { padding-left: 10px; color: var(--accent); }
+.fee-details { margin-top: -1px; border-top: 1px solid rgba(70, 97, 85, .14); border-bottom: 1px solid rgba(70, 97, 85, .14); }
+.fee-details summary { display: flex; justify-content: space-between; padding: 11px 0; color: #4e6058; font-size: 12px; cursor: pointer; list-style: none; }
+.fee-details summary::-webkit-details-marker { display: none; }
+.fee-details summary span:last-child { color: #64746d; font: 11px var(--mono); }
+.fee-details summary b { padding-left: 5px; color: var(--accent); font-size: 13px; font-weight: 400; }
+.fee-row { padding-bottom: 11px; }
+.fee-row .form-field > input { height: 34px; }
+.primary-button { display: flex; align-items: center; justify-content: center; gap: 9px; height: 43px; border: 1px solid rgba(20, 128, 92, .56); border-radius: 4px; background: linear-gradient(105deg, #178260, #0f7354); color: #ffffff; font-size: 13px; font-weight: 700; cursor: pointer; transition: filter .2s, transform .2s; }
+.primary-button:hover { filter: brightness(1.1); transform: translateY(-1px); }
+.primary-button:disabled { filter: saturate(.45); cursor: wait; transform: none; }
+.submit-button { margin-top: 1px; }
+.submit-button > span:last-child { font-size: 16px; font-weight: 400; }
+.text-button { border: 0; background: transparent; color: #8a4c45; font-size: 12px; cursor: pointer; }
+.text-button:hover { color: var(--down); }
+.form-error { padding: 8px 10px; border: 1px solid rgba(197, 75, 67, .22); border-radius: 3px; background: rgba(197, 75, 67, .05); color: #a94439; font-size: 12px; line-height: 1.5; }
+.result-column { min-width: 0; display: grid; gap: 16px; }
+.result-panel { overflow: hidden; padding: 19px 21px 0; }
+.run-status { display: inline-flex; align-items: center; gap: 7px; padding: 5px 8px; border: 1px solid #d2ded8; border-radius: 20px; color: #596b64; font: 11px var(--mono); }
+.run-status i { width: 5px; height: 5px; border-radius: 50%; background: #61716a; }
+.run-status.completed { border-color: rgba(20, 128, 92, .3); color: var(--accent); }
+.run-status.completed i, .run-status.running i { background: var(--accent); box-shadow: 0 0 8px rgba(20, 128, 92, .6); }
+.run-status.running { color: #315f4d; }
+.run-status.failed { color: var(--down); }
+.run-status.failed i { background: var(--down); }
+.run-caption { display: flex; justify-content: space-between; padding: 10px 0 0; color: #64746d; font: 11px var(--mono); }
+.result-error { margin-top: 12px; }
+.metrics-grid { display: grid; grid-template-columns: repeat(3, 1fr); margin-top: 15px; border-top: 1px solid var(--line-soft); }
+.metric-cell { min-height: 88px; display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: 6px; padding: 12px 15px; border-bottom: 1px solid var(--line-soft); }
+.metric-cell:not(:nth-child(3n)) { border-right: 1px solid var(--line-soft); }
+.metric-cell:first-child, .metric-cell:nth-child(4) { padding-left: 0; }
+.metric-cell span { color: #5f6f69; font-size: 12px; }
+.metric-cell b { color: #263631; font: 16px var(--mono); font-weight: 500; }
+.metric-cell.primary-metric b { font-size: 18px; }
+.metric-cell small { color: #6f7f78; font-size: 11px; }
+.progress-track { height: 2px; margin: 0 -21px; background: #e3eae6; }
+.progress-track i { display: block; height: 100%; background: var(--accent); box-shadow: 0 0 9px rgba(20, 128, 92, .4); transition: width .3s ease; }
+.backtest-graph-panel { padding-bottom: 12px; }
+.paper-chart { height: 330px; margin-top: 5px; }
+.paper-start-tools { display: flex; align-items: flex-end; gap: 9px; }
+.paper-start-tools .form-field { min-width: 145px; }
+.paper-start-tools .form-field > span { margin-bottom: 6px; }
+.paper-start-tools .primary-button, .paper-start-tools .secondary-button { height: 39px; white-space: nowrap; }
+.paper-error { margin: -12px 0 16px; }
+.paper-overview-panel { padding: 18px 21px 0; }
+.paper-metrics { margin-top: 10px; }
+.paper-chart-panel { margin-top: 16px; }
+.paper-holdings-panel, .paper-trades-panel { margin-top: 16px; }
+.paper-table { min-width: 850px; }
+.paper-empty-panel { padding: 27px; margin-bottom: 16px; }
+.paper-empty-panel h3 { margin: 12px 0 7px; font-size: 18px; }
+.paper-empty-panel p, .paper-operation-note p { color: #5b6b64; font-size: 13px; line-height: 1.8; }
+.paper-operation-note { margin-top: 16px; padding: 16px 20px; }
+.paper-operation-note p { margin: 8px 0 0; }
+.chart-unit { color: #687870; font: 11px var(--mono); }
+.backtest-chart { height: 332px; margin-top: 5px; }
+.chart-empty { height: 250px; display: grid; place-items: center; color: #6c7d76; font-size: 13px; text-align: center; }
+.trades-panel { padding: 17px 20px 0; }
+.trades-panel .panel-heading { margin-bottom: 12px; }
+.table-scroll, .archive-table-scroll { overflow: auto; }
+.trade-table, .archive-table { width: 100%; border-collapse: collapse; white-space: nowrap; }
+.trade-table th, .archive-table th { padding: 9px 11px; border-top: 1px solid rgba(70, 97, 85, .12); border-bottom: 1px solid rgba(70, 97, 85, .12); color: #5e6f68; text-align: left; font: 11px var(--mono); font-weight: 400; }
+.trade-table td { padding: 10px 11px; border-bottom: 1px solid rgba(70, 97, 85, .09); color: #3c4b45; font: 12px var(--mono); }
+.trade-table th:first-child, .trade-table td:first-child, .archive-table th:first-child, .archive-table td:first-child { padding-left: 0; }
+.muted { color: #5a6b63 !important; }
+.side-tag { display: inline-block; min-width: 34px; padding: 3px 5px; border-radius: 3px; background: rgba(20, 128, 92, .1); font: 11px 'Noto Sans SC', sans-serif; text-align: center; }
+.side-tag.down { background: rgba(197, 75, 67, .1); }
+.table-empty { padding: 30px 12px !important; color: #61716a !important; text-align: center !important; font-family: 'Noto Sans SC', sans-serif !important; }
+.warning-list { padding: 13px 17px; border: 1px solid rgba(168, 125, 39, .2); border-radius: 5px; background: rgba(168, 125, 39, .08); }
+.warning-list p { margin: 8px 0 0; color: #81632b; font-size: 12px; line-height: 1.55; }
+
+.history-heading { align-items: center; }
+.archive-panel { padding: 19px 22px 0; }
+.archive-panel > .panel-heading { margin-bottom: 14px; }
+.archive-table { min-width: 760px; }
+.archive-table td { padding: 14px 11px; border-bottom: 1px solid rgba(70, 97, 85, .1); color: #3f4f49; font: 12px var(--mono); }
+.archive-table tbody tr { cursor: pointer; transition: background .15s; }
+.archive-table tbody tr:hover { background: rgba(20, 128, 92, .06); }
+.archive-table td:first-child { display: table-cell; }
+.archive-table td:first-child b { color: #293a34; font: 13px var(--mono); }
+.archive-table td:first-child small { display: block; margin-top: 5px; color: #61716a; font-size: 11px; }
+.archive-status { padding: 4px 7px; border: 1px solid #d2ded8; border-radius: 3px; color: #53655e; font: 11px 'Noto Sans SC', sans-serif; }
+.archive-status.completed { border-color: rgba(20, 128, 92, .28); color: var(--accent); }
+.archive-status.failed { border-color: rgba(197, 75, 67, .3); color: var(--down); }
+.open-run { border: 0; background: transparent; color: #60716a; font-size: 16px; cursor: pointer; }
+.archive-table tr:hover .open-run { color: var(--accent); }
+.archive-foot { display: flex; justify-content: space-between; padding: 12px 0; color: #6c7c75; font: 11px var(--mono); }
+.notice-banner { display: flex; align-items: center; gap: 9px; margin: -25px 0 25px; padding: 10px 12px; border: 1px solid rgba(197, 75, 67, .22); border-radius: 4px; background: rgba(197, 75, 67, .07); color: #a94439; font-size: 13px; }
+.notice-icon { width: 16px; height: 16px; display: grid; place-items: center; border: 1px solid rgba(197, 75, 67, .55); border-radius: 50%; font: 12px var(--mono); }
+.notice-banner > span:nth-child(2) { flex: 1; }
+.notice-banner button { border: 0; background: transparent; color: #84534c; font-size: 18px; cursor: pointer; }
+.app-footer { display: flex; justify-content: space-between; gap: 15px; margin-top: 38px; padding: 17px 2px 0; border-top: 1px solid rgba(70, 97, 85, .13); color: #73827c; font: 11px var(--mono); }
+.app-footer b { color: #49665a; }
+.app-footer i { padding: 0 5px; color: #d2ded8; font-style: normal; }
+
+/* 窄屏减少横向装饰密度，并保留表格自身的横向滚动能力。 */
+@media (max-width: 1050px) {
+  .topbar { padding: 0 24px; }
+  .brand, .topbar-status { min-width: 185px; }
+  .main-nav button { padding: 0 14px; }
+  .page-content { padding: 42px 24px 25px; }
+  .backtest-layout { grid-template-columns: 310px minmax(0, 1fr); }
+  .quote-card { grid-template-columns: .9fr 1.1fr; gap: 15px; }
+  .quote-stats { padding-left: 19px; gap: 15px; }
+}
+
+@media (max-width: 760px) {
+  .topbar { height: auto; min-height: 67px; flex-wrap: wrap; padding: 13px 18px 0; }
+  .brand { min-width: 0; flex: 1; }
+  .brand-mark { width: 22px; height: 22px; }
+  .topbar-status { min-width: 0; font-size: 11px; }
+  .status-divider, .status-clock { display: none; }
+  .main-nav { width: 100%; height: 43px; order: 2; justify-content: space-around; margin-top: 8px; }
+  .main-nav button { flex: 1; padding: 0 4px; font-size: 13px; }
+  .main-nav button span { margin-right: 4px; font-size: 10px; }
+  .main-nav button.active::after { left: 12px; right: 12px; }
+  .page-content { padding: 34px 16px 20px; }
+  .page-heading { display: block; margin-bottom: 21px; }
+  .page-heading h1 { font-size: 39px; margin-top: 12px; }
+  .page-heading p { max-width: 330px; line-height: 1.7; font-size: 13px; }
+  .mobile-break { display: initial; }
+  .heading-tools { margin-top: 19px; }
+  .stock-search { width: auto; flex: 1; }
+  .search-field { height: 41px; }
+  .search-hint { display: none; }
+  .refresh-button { padding: 0 11px; }
+  .quote-card { grid-template-columns: 1fr; gap: 19px; padding: 20px 18px; }
+  .quote-main { padding: 0; }
+  .quote-value-line strong { font-size: 34px; }
+  .quote-stats { grid-template-columns: repeat(3, 1fr); gap: 14px 9px; padding: 16px 0 0; border-left: 0; border-top: 1px solid rgba(70, 97, 85, .17); }
+  .quote-stats b { font-size: 13px; }
+  .chart-panel { padding: 15px 13px 11px; }
+  .chart-range { font-size: 10px; gap: 5px; }
+  .intraday-chart-wrap { height: 285px; margin-top: 8px; }
+  .intraday-warning { max-width: 130px; }
+  .market-chart-wrap { height: 295px; margin-top: 8px; }
+  .market-lower-grid { grid-template-columns: 1fr; gap: 11px; margin-top: 11px; }
+  .compact-panel { min-height: 130px; padding: 15px; }
+  .chart-footnote { font-size: 10px; }
+  .strategy-stamp { margin-top: 20px; }
+  .backtest-layout { grid-template-columns: 1fr; gap: 13px; }
+  .form-panel { padding: 17px 16px; }
+  .result-column { gap: 12px; }
+  .metrics-grid { grid-template-columns: repeat(2, 1fr); }
+  .metric-cell { min-height: 81px; padding: 11px 10px; }
+  .metric-cell:not(:nth-child(3n)) { border-right: 0; }
+  .metric-cell:nth-child(odd) { border-right: 1px solid var(--line-soft); }
+  .metric-cell:first-child, .metric-cell:nth-child(4) { padding-left: 10px; }
+  .metric-cell:nth-child(odd) { padding-left: 0; }
+  .metric-cell b { font-size: 15px; }
+  .result-panel { padding: 17px 15px 0; }
+  .progress-track { margin: 0 -15px; }
+  .backtest-graph-panel { padding: 15px 12px 11px; }
+  .backtest-chart { height: 285px; }
+  .trades-panel { padding: 15px 13px 0; }
+  .trade-table { min-width: 620px; }
+  .history-heading { display: flex; align-items: flex-end; }
+  .history-heading .secondary-button { margin-top: 17px; }
+  .paper-start-tools { flex-wrap: wrap; margin-top: 16px; }
+  .paper-start-tools .form-field { flex: 1 1 100%; }
+  .paper-start-tools .primary-button { flex: 1; }
+  .paper-chart { height: 285px; }
+  .paper-overview-panel { padding: 16px 14px 0; }
+  .paper-operation-note { padding: 14px; }
+  .archive-panel { padding: 16px 14px 0; }
+  .archive-foot { font-size: 10px; }
+  .app-footer { flex-direction: column; font-size: 10px; margin-top: 27px; }
+}
+
+@media (max-width: 390px) {
+  .page-heading h1 { font-size: 35px; }
+  .quote-name-line { align-items: flex-start; }
+  .freshness { font-size: 10px; }
+  .form-row { gap: 8px; }
+  .run-caption { font-size: 10px; }
+}
+
+/* 基金行情与基金实验使用与现有白色工作台一致的卡片、表格和响应式间距。 */
+.fund-page-heading { align-items: flex-end; }
+.fund-market-tools { align-items: flex-end; gap: 9px; }
+.fund-type-select, .fund-search { display: grid; gap: 6px; color: #5e6f68; font-size: 11px; }
+.fund-type-select select, .fund-search input, .fund-create-form select, .fund-search-inline input {
+  height: 38px; border: 1px solid #d5e0db; border-radius: 4px; padding: 0 10px; background: #fff; color: #293a34; font: 13px 'Noto Sans SC', sans-serif;
+}
+.fund-type-select select { min-width: 112px; }
+.fund-search input { width: min(270px, 25vw); }
+.fund-market-layout { display: grid; grid-template-columns: minmax(225px, 280px) minmax(0, 1fr); align-items: start; gap: 16px; }
+.fund-list-panel { padding: 17px 16px 12px; }
+.fund-list-row { margin-top: 5px; border-top: 1px solid var(--line-soft); }
+.fund-list-row button { width: 100%; display: grid; gap: 4px; padding: 10px 8px; border: 0; border-radius: 3px; background: transparent; color: #293a34; text-align: left; cursor: pointer; }
+.fund-list-row button:hover, .fund-list-row.selected button { background: #f1f7f4; }
+.fund-list-row b { font-size: 13px; font-weight: 600; }
+.fund-list-row span { color: #65756e; font: 11px var(--mono); }
+.fund-list-row small { padding-left: 5px; font: 11px 'Noto Sans SC', sans-serif; }
+.fund-market-content { min-width: 0; display: grid; gap: 15px; }
+.fund-quote-panel { padding: 20px 21px 17px; }
+.fund-quote-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
+.fund-quote-top h2 { margin: 8px 0 3px; color: #293a34; font-size: 23px; font-weight: 600; }
+.fund-quote-top p { margin: 0; color: #65756e; font-size: 12px; }
+.fund-quote-metrics { display: grid; grid-template-columns: 1.2fr 1fr 1.2fr; gap: 9px; margin-top: 17px; }
+.fund-price-cell, .fund-info-cell { min-width: 0; display: grid; align-content: center; gap: 6px; min-height: 92px; padding: 12px 13px; border: 1px solid #dce6e1; border-radius: 4px; background: #fcfdfc; }
+.fund-price-cell span, .fund-info-cell span { color: #607169; font-size: 12px; }
+.fund-price-cell b { font: 21px var(--mono); font-weight: 600; }
+.fund-price-cell small, .fund-info-cell small { color: #708078; font-size: 11px; line-height: 1.5; }
+.fund-info-cell b { overflow: hidden; color: #293a34; font-size: 13px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.fund-inline-error { margin: 13px 0 0; }
+.fund-quote-empty, .fund-detail-placeholder { padding: 23px; }
+.fund-quote-empty p, .fund-detail-placeholder p { margin: 10px 0 0; color: #65756e; font-size: 13px; line-height: 1.6; }
+.fund-chart-panel { min-width: 0; padding: 17px 19px 12px; }
+.fund-nav-chart-wrap, .fund-paper-chart-wrap { height: 340px; margin-top: 8px; position: relative; }
+.fund-nav-chart, .fund-paper-chart { height: 100%; }
+.fund-market-content .intraday-chart-wrap { height: 320px; }
+.fund-experiment-count { min-width: 135px; display: grid; gap: 4px; padding: 12px 15px; border-left: 2px solid #16805c; background: linear-gradient(90deg, rgba(20,128,92,.07), transparent); }
+.fund-experiment-count span, .fund-experiment-count small { color: #61716a; font: 11px var(--mono); }
+.fund-experiment-count b { color: #33483e; font: 21px var(--mono); }
+.fund-experiment-layout { display: grid; grid-template-columns: minmax(310px, 370px) minmax(0, 1fr); align-items: start; gap: 16px; }
+.fund-experiment-sidebar, .fund-task-detail { min-width: 0; display: grid; gap: 14px; }
+.fund-create-panel, .fund-task-list-panel { padding: 17px 17px 14px; }
+.fund-create-form { display: grid; gap: 12px; }
+.fund-create-form select { width: 100%; }
+.fund-search-inline { display: flex; gap: 6px; }
+.fund-search-inline input { flex: 1; min-width: 0; }
+.fund-search-inline button { padding: 0 11px; border: 1px solid #d5e0db; border-radius: 4px; background: #f5f8f6; color: #36584a; cursor: pointer; }
+.fund-search-inline button:disabled { opacity: .6; cursor: wait; }
+.fund-candidate-list { max-height: 188px; overflow: auto; border: 1px solid #e0e8e4; border-radius: 4px; }
+.fund-candidate-list > button { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 10px; border: 0; border-bottom: 1px solid #edf1ef; background: white; color: #34443d; text-align: left; cursor: pointer; }
+.fund-candidate-list > button:hover { background: #f2f7f4; }
+.fund-candidate-list > button span { min-width: 0; display: grid; gap: 3px; }
+.fund-candidate-list > button b { overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.fund-candidate-list > button small { color: #718078; font: 11px var(--mono); }
+.fund-candidate-list > button i { color: var(--accent); font-size: 19px; font-style: normal; }
+.fund-candidate-empty { padding: 14px 9px; color: #74837c; font-size: 12px; text-align: center; }
+.chosen-funds { display: flex; flex-wrap: wrap; gap: 6px; }
+.chosen-fund { display: inline-flex; align-items: center; gap: 5px; padding: 3px 5px 3px 8px; border: 1px solid #d5e2db; border-radius: 16px; background: #f2f7f4; color: #426253; font: 11px var(--mono); }
+.chosen-fund button { border: 0; background: transparent; color: #74837c; font-size: 15px; line-height: 1; cursor: pointer; }
+.fund-parameter-grid { gap: 9px; }
+.fund-parameter-grid .form-field { font-size: 11px; }
+.fund-parameter-grid .number-field { height: 34px; }
+.fund-task-item { width: 100%; display: grid; gap: 8px; margin-top: 8px; padding: 11px 10px; border: 1px solid #e0e8e4; border-radius: 4px; background: #fff; color: #33443d; text-align: left; cursor: pointer; }
+.fund-task-item:hover, .fund-task-item.selected { border-color: rgba(22,128,92,.5); background: #f6faf8; }
+.fund-task-heading, .fund-task-meta, .fund-task-result { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.fund-task-heading b { overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.fund-task-heading i { flex: none; padding: 3px 6px; border: 1px solid #d3dfd9; border-radius: 12px; color: #5b6e65; font-size: 10px; font-style: normal; }
+.fund-task-heading i.running { border-color: #a7d2bb; color: #18704f; }
+.fund-task-heading i.failed { border-color: #e4b9b3; color: #a94439; }
+.fund-task-meta, .fund-task-result small { color: #708078; font-size: 11px; }
+.fund-task-result b { font: 13px var(--mono); }
+.fund-detail-overview { padding: 18px 19px 17px; }
+.fund-detail-overview h2 { margin: 4px 0 0; color: #2b3b35; font-size: 19px; }
+.fund-detail-actions { display: flex; align-items: center; gap: 8px; }
+.danger-outline-button { padding: 7px 10px; border: 1px solid #e5c0bb; border-radius: 4px; background: white; color: #a94439; font-size: 12px; cursor: pointer; }
+.danger-outline-button:disabled { opacity: .6; cursor: wait; }
+.fund-detail-caption { padding: 9px 0 0; color: #65756e; font-size: 12px; }
+.fund-account-metrics { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; margin-top: 14px; }
+.fund-account-metrics > div { min-width: 0; display: grid; gap: 6px; padding: 11px 10px; border: 1px solid #dce6e1; border-radius: 4px; background: #fcfdfc; }
+.fund-account-metrics span { color: #607169; font-size: 11px; }
+.fund-account-metrics b { overflow: hidden; color: #263630; font: 14px var(--mono); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.fund-account-metrics small { color: #77857e; font-size: 10px; }
+.fund-strategy-note { display: grid; gap: 5px; margin-top: 12px; padding: 11px 13px; border-left: 2px solid #55a27f; background: #f4f8f6; }
+.fund-strategy-note b { color: #40564d; font-size: 12px; }
+.fund-strategy-note span, .fund-strategy-note small { color: #5f7068; font-size: 11px; line-height: 1.5; }
+.fund-detail-error { margin-top: 10px; }
+.fund-paper-chart-panel { padding: 16px 18px 11px; }
+.fund-data-panel { min-width: 0; padding: 16px 18px 0; }
+.fund-data-panel .panel-heading { margin-bottom: 9px; }
+.fund-table { min-width: 780px; }
+.fund-table td { vertical-align: middle; }
+.fund-table td b { color: #34443d; font-family: 'Noto Sans SC', sans-serif; font-size: 12px; }
+.fund-table td small { display: block; margin-top: 3px; color: #718078; font-size: 10px; }
+.fund-table td.up, .fund-table td.down { font-weight: 600; }
+.fund-detail-placeholder { min-height: 240px; display: flex; flex-direction: column; justify-content: center; }
+
+@media (max-width: 1050px) {
+  .main-nav button { padding-right: 12px; padding-left: 12px; }
+  .fund-experiment-layout { grid-template-columns: minmax(280px, 330px) minmax(0, 1fr); }
+  .fund-account-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+
+@media (max-width: 760px) {
+  .main-nav { justify-content: flex-start; gap: 2px; overflow-x: auto; }
+  .main-nav button { flex: 0 0 auto; padding: 0 9px; white-space: nowrap; }
+  .fund-market-tools { align-items: stretch; flex-wrap: wrap; margin-top: 15px; }
+  .fund-type-select { flex: 0 0 125px; }
+  .fund-search { flex: 1; min-width: 160px; }
+  .fund-search input { width: 100%; }
+  .fund-market-layout, .fund-experiment-layout { grid-template-columns: 1fr; gap: 12px; }
+  .fund-list-panel { max-height: 280px; overflow: auto; }
+  .fund-quote-panel { padding: 16px 14px; }
+  .fund-quote-top h2 { font-size: 20px; }
+  .fund-quote-metrics { grid-template-columns: 1fr 1fr; }
+  .fund-price-cell { grid-column: span 2; }
+  .fund-chart-panel, .fund-paper-chart-panel { padding: 14px 12px 10px; }
+  .fund-nav-chart-wrap, .fund-paper-chart-wrap { height: 280px; }
+  .fund-market-content .intraday-chart-wrap { height: 280px; }
+  .fund-experiment-count { margin-top: 15px; grid-template-columns: auto auto 1fr; align-items: center; }
+  .fund-experiment-count b { padding-left: 8px; }
+  .fund-experiment-count small { text-align: right; }
+  .fund-create-panel, .fund-task-list-panel { padding: 15px 14px 12px; }
+  .fund-account-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .fund-account-metrics > div { min-height: 70px; }
+  .fund-detail-overview { padding: 15px 13px; }
+  .fund-detail-actions { align-items: flex-end; flex-direction: column; }
+  .fund-data-panel { padding: 14px 12px 0; }
+}

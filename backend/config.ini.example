@@ -1,0 +1,65 @@
+; 复制为 config.ini 后按本机 SQL Server/Redis 环境修改。不要把真实密码提交到版本库。
+[api]
+host = 127.0.0.1
+port = 8000
+
+[database]
+; 默认 SQL Server 实例。命名实例请写为 localhost\SQLEXPRESS 或实际实例名。
+server = localhost
+database = QuantBacktest
+; 支持 windows（集成认证）或 sql（SQL 登录）。
+authentication = windows
+username =
+password =
+encrypt = yes
+; 仅本机开发环境可按自签证书情况调整。
+trust_server_certificate = yes
+connection_timeout_seconds = 8
+statement_timeout_seconds = 30
+
+[redis]
+host = 127.0.0.1
+port = 6379
+db = 0
+password =
+socket_timeout_seconds = 3
+cache_ttl_seconds = 300
+refresh_interval_seconds = 60
+refresh_lock_seconds = 180
+
+[market_data]
+request_timeout_seconds = 20
+max_retries = 2
+; 分时接口轮询间隔，可设为至少 2 秒；独立于全市场行情和纸面实验刷新频率。
+intraday_refresh_interval_seconds = 2
+; 日线图中当日 K 线快照更新间隔。
+chart_refresh_interval_seconds = 10
+
+[backtest]
+default_initial_capital = 100000
+default_short_window = 5
+default_long_window = 20
+default_commission_rate = 0.0003
+default_minimum_commission = 5
+default_stamp_duty_rate = 0.001
+default_slippage_rate = 0.0005
+
+[paper_trading]
+; 纸面实验股票池；默认覆盖银行、能源、消费、医药、家电和有色金属。
+symbols = 600000,600028,600887,600276,000333,601899
+ma_period = 60
+breakout_period = 20
+atr_period = 20
+atr_multiplier = 2
+
+[fund]
+exchange_refresh_interval_seconds = 10
+open_nav_refresh_interval_seconds = 300
+worker_interval_seconds = 60
+default_initial_capital = 100000
+commission_rate = 0.0003
+minimum_commission = 5
+stamp_duty_rate = 0
+slippage_rate = 0.0005
+subscription_fee_rate = 0.0015
+redemption_fee_rate = 0.005
