@@ -26,6 +26,8 @@ class FakeSource:
         self.action_calls = 0
         self.intraday_calls: list[tuple[str, date]] = []
         self.intraday_bars: list[IntradayBar] = []
+        self.recent_intraday_calls: list[tuple[str, date]] = []
+        self.recent_intraday_bars: list[IntradayBar] = []
         self.quote_error = False
         self.single_quote_calls = 0
 
@@ -48,6 +50,10 @@ class FakeSource:
     def fetch_intraday_bars(self, symbol: str, trade_date: date) -> list[IntradayBar]:
         self.intraday_calls.append((symbol, trade_date))
         return self.intraday_bars
+
+    def fetch_recent_intraday_bars(self, symbol: str, end_date: date, lookback_days: int = 14) -> list[IntradayBar]:
+        self.recent_intraday_calls.append((symbol, end_date))
+        return self.recent_intraday_bars
 
     def fetch_actions(self, symbol: str) -> tuple[list[CorporateAction], list[str]]:
         self.action_calls += 1
@@ -152,6 +158,40 @@ class MarketDataServiceTests(unittest.TestCase):
         self.assertEqual(source.intraday_calls, [("600000", today)])
         self.assertEqual([bar.trade_time.date() for bar in bars], [today])
         self.assertEqual(bars[0].close, 9.65)
+
+    def test_intraday_returns_latest_available_session_on_weekend(self) -> None:
+        source = FakeSource()
+        source.recent_intraday_bars = [
+            IntradayBar(datetime(2026, 10, 12, 15, 0, tzinfo=timezone(timedelta(hours=8))), 9, 9, 9, 9),
+            IntradayBar(datetime(2026, 10, 16, 15, 0, tzinfo=timezone(timedelta(hours=8))), 10, 10, 10, 10),
+            IntradayBar(datetime(2026, 10, 19, 9, 31, tzinfo=timezone(timedelta(hours=8))), 11, 11, 11, 11),
+        ]
+        service = MarketDataService(
+            FakeRepository(), source, FakeCache(), settings(),
+            clock=lambda: datetime(2026, 10, 18, 8, 0, tzinfo=timezone.utc),
+        )
+
+        bars = service.get_intraday_bars("600000")
+
+        self.assertEqual([bar.trade_time.date() for bar in bars], [date(2026, 10, 16)])
+        self.assertEqual(source.intraday_calls, [("600000", date(2026, 10, 18))])
+        self.assertEqual(source.recent_intraday_calls, [("600000", date(2026, 10, 18))])
+
+    def test_intraday_reuses_recent_session_fallback_during_polling(self) -> None:
+        source = FakeSource()
+        source.recent_intraday_bars = [
+            IntradayBar(datetime(2026, 10, 16, 15, 0, tzinfo=timezone(timedelta(hours=8))), 10, 10, 10, 10),
+        ]
+        service = MarketDataService(
+            FakeRepository(), source, FakeCache(), settings(),
+            clock=lambda: datetime(2026, 10, 18, 8, 0, tzinfo=timezone.utc),
+        )
+
+        first = service.get_intraday_bars("600000")
+        second = service.get_intraday_bars("600000")
+
+        self.assertEqual(first, second)
+        self.assertEqual(len(source.recent_intraday_calls), 1)
 
     def test_reuses_fresh_quote_and_returns_old_snapshot_as_stale_on_source_error(self) -> None:
         now = datetime(2024, 1, 2, tzinfo=timezone.utc)

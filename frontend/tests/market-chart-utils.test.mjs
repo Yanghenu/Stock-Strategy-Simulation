@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mergeLiveDailyBar } from '../src/market-chart-utils.ts'
+import { intradayDisplayLabels, mergeLiveDailyBar } from '../src/market-chart-utils.ts'
 
 const yesterday = {
   trade_date: '2026-10-12', open: 7.2, high: 7.7, low: 7.1, close: 7.5,
@@ -35,4 +35,27 @@ test('keeps historical candles unchanged when the minute feed has no bars for to
   const result = mergeLiveDailyBar([yesterday], [], quote, '2026-10-13')
 
   assert.deepEqual(result, [yesterday])
+})
+
+test('labels a closed-market intraday chart with its actual session date and last minute', () => {
+  const minutes = [
+    { trade_time: '2026-10-16T14:59:00+08:00', open: 10, high: 10, low: 10, close: 10, volume: 100, turnover: 1000 },
+    { trade_time: '2026-10-16T15:00:00+08:00', open: 10, high: 10, low: 10, close: 10, volume: 120, turnover: 1200 },
+  ]
+
+  assert.deepEqual(intradayDisplayLabels(minutes, '2026-10-18'), {
+    eyebrow: 'INTRADAY · 1 MINUTE',
+    latest: '2026年10月16日 · 最新分钟 15:00',
+  })
+})
+
+test('shows the current session minute without labeling it as historical', () => {
+  const minutes = [
+    { trade_time: '2026-10-18T10:02:00+08:00', open: 10, high: 10, low: 10, close: 10, volume: 100, turnover: 1000 },
+  ]
+
+  assert.deepEqual(intradayDisplayLabels(minutes, '2026-10-18'), {
+    eyebrow: 'INTRADAY · 1 MINUTE',
+    latest: '今日 · 最新分钟 10:02',
+  })
 })

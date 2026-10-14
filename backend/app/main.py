@@ -8,7 +8,7 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from app.api.routes import backtests, config, fund_paper as fund_paper_routes, funds, market, paper_trading, watchlist
+from app.api.routes import backtests, config, fund_paper as fund_paper_routes, funds, market, paper_trading, stock_screen, watchlist
 from app.cache.redis_cache import CacheUnavailableError, RedisCache
 from app.config import Settings, load_settings
 from app.database import DatabaseUnavailableError
@@ -22,6 +22,8 @@ from app.repositories.fund_repository import FundRepository
 from app.services.backtest_manager import BacktestManager
 from app.paper_trading.manager import PaperTradingManager
 from app.fund_paper.manager import FundPaperTradingManager
+from app.stock_screen.manager import StockScreenManager
+from app.stock_screen.repository import StockScreenRepository
 
 logging.basicConfig(
     level=logging.INFO,
@@ -39,6 +41,7 @@ def create_app(
     fund_repository: Any | None = None,
     fund_market_service: Any | None = None,
     fund_paper_manager: Any | None = None,
+    stock_screen_manager: Any | None = None,
 ) -> FastAPI:
     """支持替换外部依赖，便于离线测试；默认组件在请求/启动边界延迟连接服务。"""
 
@@ -53,6 +56,7 @@ def create_app(
     fund_source = AKShareFundSource(resolved.market_data)
     fund_market = fund_market_service or FundMarketDataService(fund_repo, fund_source, resolved.fund)
     fund_paper = fund_paper_manager or FundPaperTradingManager(fund_repo, fund_market, resolved)
+    screen = stock_screen_manager or StockScreenManager(StockScreenRepository(repo), market_data, resolved.stock_screen)
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
@@ -74,9 +78,15 @@ def create_app(
             except Exception:
                 # 基金实验 worker 与既有股票实验分开启动，单独失败不停止股票实验。
                 logger.exception("基金实验 worker 未能启动；基金任务暂不自动运行")
+            if isinstance(repo, SqlRepository) or stock_screen_manager is not None:
+                try:
+                    screen.start()
+                except Exception:
+                    logger.exception("选股实验 worker 未能启动")
         try:
             yield
         finally:
+            screen.shutdown()
             try:
                 fund_paper.shutdown()
             except Exception:
@@ -93,6 +103,7 @@ def create_app(
     application.state.fund_repository = fund_repo
     application.state.fund_market_service = fund_market
     application.state.fund_paper_manager = fund_paper
+    application.state.stock_screen_manager = screen
 
     @application.exception_handler(DatabaseUnavailableError)
     async def database_error(_: Request, exc: DatabaseUnavailableError):
@@ -138,6 +149,7 @@ def create_app(
     application.include_router(watchlist.router, prefix="/api")
     application.include_router(funds.router, prefix="/api")
     application.include_router(fund_paper_routes.router, prefix="/api")
+    application.include_router(stock_screen.router, prefix="/api")
     return application
 
 

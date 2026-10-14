@@ -80,6 +80,10 @@ class BacktestParams:
     trend_ma_period: int = 60
     max_positions: int = 3
     rebalance_interval_days: int = 7
+    # 防御型均值回归参数追加在末尾，兼容旧策略的位置参数调用。
+    max_holding_days: int = 5
+    cooldown_days: int = 3
+    target_annual_volatility: float = 0.15
 
 
 @dataclass(frozen=True)

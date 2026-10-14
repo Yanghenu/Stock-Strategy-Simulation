@@ -367,6 +367,9 @@ onBeforeUnmount(() => {
             <option v-for="strategy in strategies" :key="strategy.code" :value="strategy.code">{{ strategy.name }}</option>
           </select>
           <p v-if="selectedStrategy" class="strategy-description">{{ selectedStrategy.description }}</p>
+          <p v-if="form.strategy_code === 'defensive_mean_reversion'" class="strategy-description">
+            长期趋势过滤有效且短期超卖时入场，按波动率缩放仓位并受最大仓位限制；每只股票使用独立风险额度，未投入部分保留现金，不跨股票轮动挪用。停机期间错过的信号不会补单。
+          </p>
           <div v-if="selectedStrategy" class="strategy-parameters">
             <div class="parameter-heading"><b>策略参数</b><small>切换策略后可分别调整</small></div>
             <div v-if="selectedStrategy.parameters.length" class="strategy-parameter-grid">
@@ -448,6 +451,7 @@ onBeforeUnmount(() => {
             <b>策略规则</b>
             <span>{{ sessionStrategy.description }}</span>
             <small>本任务参数：{{ savedParameterSummary(selectedSession.strategy_code, selectedSession) }}</small>
+            <small v-if="selectedSession.strategy_code === 'defensive_mean_reversion'">长期趋势过滤有效且短期超卖时入场，按波动率控制仓位；每只股票使用独立风险额度，未投入部分保留现金，不跨股票轮动挪用额度。停机期间错过的信号不补单。</small>
             <small v-if="selectedSession.strategy_code === 'momentum_rotation'">最近调仓：{{ timeLabel(selectedSession.last_rebalanced_at) }}</small>
           </div>
         </section>
@@ -501,15 +505,15 @@ onBeforeUnmount(() => {
           <div class="panel-heading"><div><span class="eyebrow">EXECUTIONS</span><h3>模拟成交</h3></div><span class="count-pill">{{ selectedSession.trades.length }}</span></div>
           <div class="archive-table-scroll">
             <table class="archive-table paper-table">
-              <thead><tr><th>时间</th><th>股票</th><th>方向</th><th>成交价</th><th>数量</th><th>费用</th><th>触发规则</th></tr></thead>
+              <thead><tr><th>信号日期</th><th>行情报价执行时间</th><th>股票</th><th>方向</th><th>成交价</th><th>数量</th><th>费用</th><th>触发规则</th></tr></thead>
               <tbody>
                 <tr v-for="(trade, index) in [...selectedSession.trades].reverse()" :key="`${trade.symbol}-${trade.trade_date}-${index}`">
-                  <td>{{ timeLabel(trade.trade_date) }}</td><td>{{ trade.symbol }}</td>
+                  <td>{{ trade.signal_date ? trade.signal_date.slice(0, 10) : '—' }}</td><td>{{ timeLabel(trade.trade_date) }}</td><td>{{ trade.symbol }}</td>
                   <td><span :class="['side-tag', trade.side === 'sell' ? 'down' : '']">{{ trade.side === 'buy' ? '买入' : '卖出' }}</span></td>
                   <td>{{ amount(trade.price) }}</td><td>{{ trade.quantity.toLocaleString('zh-CN') }}</td>
                   <td>{{ amount(trade.commission + trade.stamp_duty) }}</td><td class="muted">{{ trade.reason }}</td>
                 </tr>
-                <tr v-if="!selectedSession.trades.length"><td colspan="7" class="table-empty">暂时没有成交；没有满足策略条件时，资金会保留为现金。</td></tr>
+                <tr v-if="!selectedSession.trades.length"><td colspan="8" class="table-empty">暂时没有成交；没有满足策略条件时，资金会保留为现金。</td></tr>
               </tbody>
             </table>
           </div>

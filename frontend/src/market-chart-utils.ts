@@ -59,3 +59,22 @@ export function aggregateIntradayOhlc(
   }
   return { open: minutes[0].open, high, low }
 }
+
+/**
+ * 根据分钟线实际时间戳生成图表标签；休市回退数据会显示上一交易日，
+ * 让用户能区分“今天的盘中数据”和“最近一个已收盘交易日的数据”。
+ */
+export function intradayDisplayLabels(intraday: IntradayBar[], today: string): { eyebrow: string; latest: string } {
+  const latest = intraday.at(-1)?.trade_time
+  if (!latest) return { eyebrow: 'INTRADAY · 1 MINUTE', latest: '等待最近交易日分钟线' }
+
+  const tradeDate = latest.slice(0, 10)
+  const [year, month, day] = tradeDate.split('-')
+  const dateLabel = `${year}年${month}月${day}日`
+  return {
+    eyebrow: 'INTRADAY · 1 MINUTE',
+    latest: tradeDate === today
+      ? `今日 · 最新分钟 ${latest.slice(11, 16)}`
+      : `${dateLabel} · 最新分钟 ${latest.slice(11, 16)}`,
+  }
+}

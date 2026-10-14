@@ -11,8 +11,9 @@ let resizeObserver: ResizeObserver | undefined
 function render() {
   if (!chart || !props.result) return
   const curve = props.result.equity_curve || []
-  // 轮动策略的基准覆盖整组股票，图例需说明等权买入持有的含义。
-  const benchmarkName = props.result.strategy_code === 'momentum_rotation' ? '股票池等权买入持有' : '买入持有'
+  // 根据策略解释基准口径；防御策略使用全仓买入持有，旧策略标签保持原样。
+  const benchmarkName = props.result.strategy_code === 'defensive_mean_reversion' ? '全仓买入持有'
+    : props.result.strategy_code === 'momentum_rotation' ? '股票池等权买入持有' : '买入持有'
   const dates = curve.map((point) => point.trade_date)
   const equityByDate = new Map(curve.map((point) => [point.trade_date, point.equity]))
   const markers = (props.result.trades || []).flatMap((trade) => {

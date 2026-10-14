@@ -4,7 +4,7 @@ import logging
 import threading
 import time
 from contextlib import contextmanager
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Iterator
 
 from app.config import MarketDataSettings
@@ -135,6 +135,9 @@ class AKShareSource:
             bars = normalize_intraday_bars(rows, volume_multiplier=100)
             if bars:
                 return bars
+            # 当天接口正常但还没有分钟数据时，交由服务层按较低频率查历史窗口；
+            # 避免休市期间每 2 秒再额外请求新浪接口。
+            return []
         except (MarketDataSourceError, MarketDataError) as exc:
             errors.append(exc if isinstance(exc, MarketDataSourceError) else MarketDataSourceError(str(exc)))
             logger.warning("AKShare 东方财富分钟行情不可用，切换到新浪分钟行情")
@@ -151,6 +154,38 @@ class AKShareSource:
         if len(errors) == 2:
             logger.error("AKShare 东方财富和新浪分钟行情接口都不可用：%s", errors[-1])
             raise MarketDataSourceError("AKShare 东方财富和新浪分钟行情接口暂时不可用") from errors[-1]
+        return []
+
+    def fetch_recent_intraday_bars(self, symbol: str, end_date: date, lookback_days: int = 14):
+        """休市时回查有限日期窗口，返回标准化分钟线供服务层挑选最近交易日。"""
+
+        start_date = end_date - timedelta(days=max(1, lookback_days))
+        errors: list[MarketDataSourceError] = []
+        try:
+            rows = self._call(
+                "stock_zh_a_hist_min_em", symbol=symbol,
+                start_date=f"{start_date.isoformat()} 09:15:00",
+                end_date=f"{end_date.isoformat()} 15:00:00", period="1", adjust="",
+            )
+            bars = normalize_intraday_bars(rows, volume_multiplier=100)
+            if bars:
+                return bars
+        except (MarketDataSourceError, MarketDataError) as exc:
+            errors.append(exc if isinstance(exc, MarketDataSourceError) else MarketDataSourceError(str(exc)))
+            logger.warning("AKShare 东方财富历史分钟行情不可用，切换到新浪分钟行情")
+
+        prefix = "sh" if symbol.startswith(("60", "68", "90")) else "sz" if symbol.startswith(("00", "30")) else "bj"
+        try:
+            rows = self._call("stock_zh_a_minute", symbol=f"{prefix}{symbol}", period="1", adjust="")
+            bars = normalize_intraday_bars(rows)
+            if bars:
+                return bars
+        except (MarketDataSourceError, MarketDataError) as exc:
+            errors.append(exc if isinstance(exc, MarketDataSourceError) else MarketDataSourceError(str(exc)))
+
+        if len(errors) == 2:
+            logger.error("AKShare 东方财富和新浪历史分钟行情都不可用：%s", errors[-1])
+            raise MarketDataSourceError("AKShare 东方财富和新浪历史分钟行情暂时不可用") from errors[-1]
         return []
 
     def fetch_actions(self, symbol: str):

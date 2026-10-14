@@ -125,16 +125,22 @@ VALUES (source.symbol, source.name, SYSUTCDATETIME());"""
         trend_ma_period: int = 60,
         max_positions: int = 3,
         rebalance_interval_days: int = 7,
+        max_holding_days: int = 5,
+        cooldown_days: int = 3,
+        target_annual_volatility: float = 0.15,
+        max_position_ratio: float = 0.7,
     ) -> None:
         """在一个事务中创建任务及逐股票预算；旧月度调用保留默认字段。"""
 
         # status 使用固定值 running，其余策略列都通过参数绑定，避免字段顺序错位。
+        # 防御型参数有独立列和兼容默认值，旧任务创建调用不需要变更。
         session_sql = """INSERT INTO dbo.paper_sessions
     (session_id, task_name, strategy_code, status, started_at, ends_at, initial_capital, cash,
      commission_rate, minimum_commission, stamp_duty_rate, slippage_rate,
      ma_period, breakout_period, atr_period, atr_multiplier, short_ma_period, long_ma_period,
-     momentum_period_days, trend_ma_period, max_positions, rebalance_interval_days)
-VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);"""
+     momentum_period_days, trend_ma_period, max_positions, rebalance_interval_days,
+     max_holding_days, cooldown_days, target_annual_volatility, max_position_ratio)
+VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);"""
         symbol_sql = """INSERT INTO dbo.paper_session_symbols (session_id, symbol, budget)
 VALUES (?, ?, ?);"""
         with self._transaction() as connection:
@@ -150,6 +156,7 @@ VALUES (?, ?, ?);"""
                         ma_period, breakout_period, atr_period, float(atr_multiplier),
                         short_ma_period, long_ma_period, momentum_period_days, trend_ma_period,
                         max_positions, rebalance_interval_days,
+                        max_holding_days, cooldown_days, float(target_annual_volatility), float(max_position_ratio),
                     ),
                 )
                 cursor.executemany(
@@ -172,14 +179,16 @@ VALUES (?, ?, ?, 0, ?, 0);""",
         sql = """SELECT session_id, task_name, strategy_code, started_at, ends_at, initial_capital, cash,
     commission_rate, minimum_commission, stamp_duty_rate, slippage_rate,
     ma_period, breakout_period, atr_period, atr_multiplier, short_ma_period, long_ma_period,
-    momentum_period_days, trend_ma_period, max_positions, rebalance_interval_days, last_rebalanced_at
+    momentum_period_days, trend_ma_period, max_positions, rebalance_interval_days, last_rebalanced_at,
+    max_holding_days, cooldown_days, target_annual_volatility, max_position_ratio
 FROM dbo.paper_sessions WHERE status='running' ORDER BY started_at, session_id;"""
         names = (
             "session_id", "task_name", "strategy_code", "started_at", "ends_at", "initial_capital", "cash",
             "commission_rate", "minimum_commission", "stamp_duty_rate", "slippage_rate",
             "ma_period", "breakout_period", "atr_period", "atr_multiplier", "short_ma_period", "long_ma_period",
             "momentum_period_days", "trend_ma_period", "max_positions", "rebalance_interval_days",
-            "last_rebalanced_at",
+            "last_rebalanced_at", "max_holding_days", "cooldown_days",
+            "target_annual_volatility", "max_position_ratio",
         )
         with self._transaction() as connection:
             cursor = connection.cursor()
@@ -256,13 +265,14 @@ WHERE session_id=? AND status='running';""",
 
         sql = """SELECT s.symbol, COALESCE(k.name, s.symbol), s.budget, s.shares,
     s.entry_date, s.entry_price, s.cost_basis, s.highest_price, s.atr_value,
-    s.last_price, s.last_quote_at
+    s.last_price, s.last_quote_at, s.last_exit_date, s.last_decision_date
 FROM dbo.paper_session_symbols AS s
 LEFT JOIN dbo.stocks AS k ON k.symbol=s.symbol
 WHERE s.session_id=? ORDER BY s.symbol;"""
         names = (
             "symbol", "name", "budget", "shares", "entry_date", "entry_price",
             "cost_basis", "highest_price", "atr_value", "last_price", "last_quote_at",
+            "last_exit_date", "last_decision_date",
         )
         with self._transaction() as connection:
             cursor = connection.cursor()
@@ -282,22 +292,25 @@ WHERE s.session_id=? ORDER BY s.symbol;"""
         cash: float,
         trade: dict[str, Any] | None,
         processed_at: datetime | None = None,
+        decision_date: date | None = None,
     ) -> bool:
         """按报价时间幂等更新持仓、现金和成交，防止重启/重复轮询重复下单。"""
 
         quote_time = self._db_datetime(quote_fetched_at)
         # 保留信号决策时间，之后在任务行锁内再读一次时钟，处理锁等待跨过截止点的情况。
         process_time = self._db_datetime(processed_at) if processed_at else None
-        select_sql = """SELECT last_quote_at FROM dbo.paper_session_symbols WITH (UPDLOCK, HOLDLOCK)
+        select_sql = """SELECT last_quote_at, last_decision_date FROM dbo.paper_session_symbols WITH (UPDLOCK, HOLDLOCK)
 WHERE session_id=? AND symbol=?;"""
         update_sql = """UPDATE dbo.paper_session_symbols SET shares=?, entry_date=?, entry_price=?,
-    cost_basis=?, highest_price=?, atr_value=?, last_price=?, last_quote_at=?
+    cost_basis=?, highest_price=?, atr_value=?, last_price=?, last_quote_at=?,
+    last_exit_date=COALESCE(?, last_exit_date), last_decision_date=COALESCE(?, last_decision_date)
 WHERE session_id=? AND symbol=? AND (last_quote_at IS NULL OR last_quote_at < ?);"""
+        # 未提供日期时保留数据库既有值；新信号日即使没有成交也在持仓更新中原子落库。
         cash_sql = "UPDATE dbo.paper_sessions SET cash=? WHERE session_id=? AND status='running';"
         trade_sql = """INSERT INTO dbo.paper_trades
     (session_id, symbol, quote_fetched_at, side, execution_price, quantity,
-     notional, commission, stamp_duty, reason)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);"""
+     notional, commission, stamp_duty, reason, signal_date)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);"""
         with self._transaction() as connection:
             cursor = connection.cursor()
             try:
@@ -322,12 +335,16 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);"""
                 row = cursor.fetchone()
                 if row is None or (row[0] is not None and row[0] >= quote_time):
                     return False
+                # 行锁内检查信号日；拒绝重复或过期决策，避免先修改现金/持仓后才防重。
+                if decision_date is not None and row[1] is not None and decision_date <= row[1]:
+                    return False
                 cursor.execute(
                     update_sql,
                     (
                         int(state["shares"]), state["entry_date"], state["entry_price"],
                         float(state["cost_basis"]), state["highest_price"], state["atr_value"],
-                        float(state["last_price"]), quote_time, session_id, symbol, quote_time,
+                        float(state["last_price"]), quote_time, state.get("last_exit_date"),
+                        decision_date, session_id, symbol, quote_time,
                     ),
                 )
                 if cursor.rowcount <= 0:
@@ -340,7 +357,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);"""
                             session_id, symbol, quote_time, trade["side"],
                             float(trade["execution_price"]), int(trade["quantity"]),
                             float(trade["notional"]), float(trade["commission"]),
-                            float(trade["stamp_duty"]), str(trade["reason"]),
+                            float(trade["stamp_duty"]), str(trade["reason"]), decision_date,
                         ),
                     )
                 return True
@@ -372,16 +389,18 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);"""
 FROM dbo.paper_sessions WITH (UPDLOCK, HOLDLOCK) WHERE session_id=?;"""
         symbol_sql = """SELECT symbol, last_quote_at
 FROM dbo.paper_session_symbols WITH (UPDLOCK, HOLDLOCK) WHERE session_id=?;"""
+        # 组合调仓的旧策略不传日期；COALESCE 避免清空防御型策略已经保存的状态。
         update_sql = """UPDATE dbo.paper_session_symbols SET budget=?, shares=?, entry_date=?,
-    entry_price=?, cost_basis=?, highest_price=?, atr_value=?, last_price=?, last_quote_at=?
+    entry_price=?, cost_basis=?, highest_price=?, atr_value=?, last_price=?, last_quote_at=?,
+    last_exit_date=COALESCE(?, last_exit_date), last_decision_date=COALESCE(?, last_decision_date)
 WHERE session_id=? AND symbol=? AND (last_quote_at IS NULL OR last_quote_at < ?);"""
         cash_sql = """UPDATE dbo.paper_sessions
 SET cash=?, last_rebalanced_at=COALESCE(?, last_rebalanced_at)
 WHERE session_id=? AND status='running';"""
         trade_sql = """INSERT INTO dbo.paper_trades
     (session_id, symbol, quote_fetched_at, side, execution_price, quantity,
-     notional, commission, stamp_duty, reason)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);"""
+     notional, commission, stamp_duty, reason, signal_date)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);"""
         equity_sql = """MERGE dbo.paper_equity WITH (HOLDLOCK) AS target
 USING (VALUES (?, ?, ?, ?, ?, ?)) AS source (session_id, trade_date, cash, market_value, equity, drawdown)
 ON target.session_id=source.session_id AND target.trade_date=source.trade_date
@@ -423,7 +442,8 @@ VALUES (source.session_id, source.trade_date, source.cash, source.market_value, 
                         (
                             float(item["budget"]), int(item["shares"]), item["entry_date"], item["entry_price"],
                             float(item["cost_basis"]), item["highest_price"], item["atr_value"],
-                            float(item["last_price"]), quote_time, session_id, item["symbol"], quote_time,
+                            float(item["last_price"]), quote_time, item.get("last_exit_date"),
+                            item.get("last_decision_date"), session_id, item["symbol"], quote_time,
                         ),
                     )
                     if cursor.rowcount <= 0:
@@ -439,6 +459,7 @@ VALUES (source.session_id, source.trade_date, source.cash, source.market_value, 
                             session_id, symbol, self._db_datetime(trade["quote_fetched_at"]), trade["side"],
                             float(trade["execution_price"]), int(trade["quantity"]), float(trade["notional"]),
                             float(trade["commission"]), float(trade["stamp_duty"]), str(trade["reason"]),
+                            trade.get("signal_date"),
                         ),
                     )
 
@@ -538,7 +559,8 @@ VALUES (source.session_id, source.trade_date, source.cash, source.market_value, 
     initial_capital, cash, ma_period, breakout_period, atr_period, atr_multiplier,
     commission_rate, minimum_commission, stamp_duty_rate, slippage_rate,
     short_ma_period, long_ma_period, momentum_period_days, trend_ma_period, max_positions,
-    rebalance_interval_days, last_rebalanced_at, error_message
+    rebalance_interval_days, last_rebalanced_at, error_message,
+    max_holding_days, cooldown_days, target_annual_volatility, max_position_ratio
 FROM dbo.paper_sessions WHERE session_id=?;"""
         session_names = (
             "session_id", "task_name", "strategy_code", "status", "started_at", "ends_at", "completed_at",
@@ -546,13 +568,14 @@ FROM dbo.paper_sessions WHERE session_id=?;"""
             "commission_rate", "minimum_commission", "stamp_duty_rate", "slippage_rate",
             "short_ma_period", "long_ma_period", "momentum_period_days", "trend_ma_period", "max_positions",
             "rebalance_interval_days", "last_rebalanced_at", "error_message",
+            "max_holding_days", "cooldown_days", "target_annual_volatility", "max_position_ratio",
         )
         symbol_sql = """SELECT s.symbol, COALESCE(k.name, s.symbol), s.budget, s.shares,
-    s.entry_date, s.entry_price, s.cost_basis, s.highest_price, s.atr_value, s.last_price, s.last_quote_at
+    s.entry_date, s.entry_price, s.cost_basis, s.highest_price, s.atr_value, s.last_price, s.last_quote_at, s.last_exit_date, s.last_decision_date
 FROM dbo.paper_session_symbols AS s LEFT JOIN dbo.stocks AS k ON k.symbol=s.symbol
 WHERE s.session_id=? ORDER BY s.symbol;"""
         trade_sql = """SELECT symbol, quote_fetched_at, side, execution_price, quantity,
-    notional, commission, stamp_duty, reason
+    notional, commission, stamp_duty, reason, signal_date
 FROM dbo.paper_trades WHERE session_id=? ORDER BY quote_fetched_at, trade_id;"""
         with self._transaction() as connection:
             cursor = connection.cursor()
@@ -568,6 +591,7 @@ FROM dbo.paper_trades WHERE session_id=? ORDER BY quote_fetched_at, trade_id;"""
                 symbol_names = (
                     "symbol", "name", "budget", "shares", "entry_date", "entry_price", "cost_basis",
                     "highest_price", "atr_value", "last_price", "last_quote_at",
+                    "last_exit_date", "last_decision_date",
                 )
                 symbols = [dict(zip(symbol_names, item)) for item in symbol_rows]
                 cursor.execute(
@@ -582,7 +606,7 @@ FROM dbo.paper_trades WHERE session_id=? ORDER BY quote_fetched_at, trade_id;"""
         curve_names = ("trade_date", "cash", "market_value", "equity", "drawdown")
         trade_names = (
             "symbol", "trade_date", "side", "price", "quantity", "notional",
-            "commission", "stamp_duty", "reason",
+            "commission", "stamp_duty", "reason", "signal_date",
         )
         result["symbols"] = symbols
         result["equity_curve"] = [dict(zip(curve_names, item)) for item in curve_rows]
@@ -780,8 +804,8 @@ ORDER BY ex_date;"""
      ma_period, breakout_period, atr_period, atr_multiplier, momentum_period_days,
      trend_ma_period, max_positions, rebalance_interval_days,
      initial_capital, position_ratio, commission_rate, minimum_commission,
-     stamp_duty_rate, slippage_rate, status, progress)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0);"""
+     stamp_duty_rate, slippage_rate, max_holding_days, cooldown_days, target_annual_volatility, status, progress)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0);"""
         values = (
             run_id, params.symbol, params.start_date, params.end_date, params.strategy_code,
             params.short_window, params.long_window, params.ma_period, params.breakout_period,
@@ -789,6 +813,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued',
             params.trend_ma_period, params.max_positions, params.rebalance_interval_days,
             params.initial_capital, params.position_ratio,
             params.commission_rate, params.minimum_commission, params.stamp_duty_rate, params.slippage_rate,
+            params.max_holding_days, params.cooldown_days, params.target_annual_volatility,
         )
         with self._transaction() as connection:
             cursor = connection.cursor()
@@ -925,7 +950,7 @@ VALUES (?, ?, ?);"""
     minimum_commission, stamp_duty_rate, slippage_rate, status, progress,
     total_return, annualized_return, max_drawdown, annualized_volatility,
     sharpe_ratio, win_rate, closed_trade_count, fees_total, dividends_total,
-    benchmark_return, error_message, created_at
+    benchmark_return, error_message, created_at, max_holding_days, cooldown_days, target_annual_volatility
 FROM dbo.backtest_runs WHERE run_id=?;"""
         names = (
             "run_id", "symbol", "start_date", "end_date", "strategy_code", "short_window",
@@ -936,6 +961,7 @@ FROM dbo.backtest_runs WHERE run_id=?;"""
             "total_return", "annualized_return", "max_drawdown", "annualized_volatility",
             "sharpe_ratio", "win_rate", "closed_trade_count", "fees_total", "dividends_total",
             "benchmark_return", "error_message", "created_at",
+            "max_holding_days", "cooldown_days", "target_annual_volatility",
         )
         with self._transaction() as connection:
             cursor = connection.cursor()

@@ -6,7 +6,11 @@ from datetime import date
 from math import floor, isfinite
 
 from app.backtest.metrics import calculate_metrics
-from app.paper_trading.strategy import find_entry_atr, should_exit
+from app.paper_trading.strategy import (
+    evaluate_defensive_mean_reversion,
+    find_entry_atr,
+    should_exit,
+)
 from app.models import (
     BacktestParams,
     BacktestResult,
@@ -34,7 +38,9 @@ class _Position:
 def validate_backtest_params(params: BacktestParams) -> None:
     """在创建持久化任务前校验周期、资金、费率与日期边界。"""
 
-    if params.strategy_code not in ("dual_ma", "breakout_ma_atr", "momentum_rotation"):
+    if params.strategy_code not in (
+        "dual_ma", "breakout_ma_atr", "momentum_rotation", "defensive_mean_reversion",
+    ):
         raise ValueError("不支持的回测策略")
     symbols = params.symbols or (params.symbol,)
     if (not symbols or len(symbols) > 20 or len(set(symbols)) != len(symbols)
@@ -57,6 +63,17 @@ def validate_backtest_params(params: BacktestParams) -> None:
         or params.max_positions > 20
     ):
         raise ValueError("组合轮动策略参数无效")
+    if params.strategy_code == "defensive_mean_reversion" and (
+        not 21 <= params.trend_ma_period <= 250
+        or not 1 <= params.atr_period <= 100
+        or not isfinite(params.atr_multiplier) or not 0.1 <= params.atr_multiplier <= 10
+        or not 1 <= params.max_holding_days <= 120
+        or not 0 <= params.cooldown_days <= 120
+        or not isfinite(params.target_annual_volatility)
+        or not 0.01 <= params.target_annual_volatility <= 2
+        or not isfinite(params.position_ratio) or not 0.01 <= params.position_ratio <= 1
+    ):
+        raise ValueError("防御型均值回归策略参数无效")
     if not isfinite(params.initial_capital) or params.initial_capital <= 0:
         raise ValueError("初始资金必须大于 0")
     if not 0 < params.position_ratio <= 1:
@@ -111,11 +128,14 @@ def _buy_holdings(
     entry_date: date | None,
     bar: Bar,
     params: BacktestParams,
+    budget_ratio: float | None = None,
 ) -> tuple[float, int, date | None]:
-    """基准在首个回测交易日开盘买入相同资金比例的整手股票。"""
+    """基准在首个回测日开盘按给定资金比例买入整手股票。"""
 
     price = bar.open * (1 + params.slippage_rate)
-    quantity = _whole_lot_quantity(cash, params.position_ratio, price, params)
+    quantity = _whole_lot_quantity(
+        cash, params.position_ratio if budget_ratio is None else budget_ratio, price, params,
+    )
     if quantity == 0:
         return cash, shares, entry_date
     notional = quantity * price
@@ -130,7 +150,7 @@ def run_backtest(
     cancel_check=None,
     progress_callback=None,
 ) -> BacktestResult:
-    """运行双均线策略；预热行情只参与均线，不计入回测账户。"""
+    """运行单股回测；预热行情只用于策略信号，不计入回测账户。"""
 
     _validate_inputs(bars, params)
     action_map: dict[date, list[CorporateAction]] = defaultdict(list)
@@ -169,8 +189,13 @@ def run_backtest(
     fees_total = 0.0
     pending: tuple[str, date, str] | None = None
     pending_atr: float | None = None
+    # 买入信号的波动率仓位随待成交单保留到下一交易日开盘撮合。
+    pending_position_ratio: float | None = None
     entry_atr: float | None = None
+    entry_price: float | None = None
     highest_price: float | None = None
+    last_exit_date: date | None = None
+    bonus_liquidation_date: date | None = None
     peak = params.initial_capital
     benchmark_cash = params.initial_capital
     benchmark_shares = 0
@@ -179,6 +204,7 @@ def run_backtest(
 
     for completed, index in enumerate(active_indices, start=1):
         bar = bars[index]
+        bonus_shares_added_today = 0
         if cancel_check is not None and cancel_check():
             # 取消使用异常中断，调用层不会把部分曲线和成交写入数据库。
             raise InterruptedError("回测已取消")
@@ -207,9 +233,13 @@ def run_backtest(
                             )
                             break
                 if bonus:
+                    bonus_shares_added_today += bonus
                     # 送轉股是已取得的持倉權益；原倉位若已賣出，建立零現金成本的持倉批次。
                     if position is None:
                         position = _Position(bar.trade_date, bonus, 0)
+                        if params.strategy_code == "defensive_mean_reversion":
+                            # 记录权益到账日，供防御策略遵守 T+1 限制。
+                            bonus_liquidation_date = bar.trade_date
                     else:
                         position.shares += bonus
                     shares += bonus
@@ -226,7 +256,11 @@ def run_backtest(
             side, signal_date, reason = pending
             if side == "buy" and position is None:
                 price = bar.open * (1 + params.slippage_rate)
-                quantity = _whole_lot_quantity(cash, params.position_ratio, price, params)
+                buy_ratio = (
+                    pending_position_ratio if params.strategy_code == "defensive_mean_reversion"
+                    else params.position_ratio
+                )
+                quantity = _whole_lot_quantity(cash, buy_ratio or 0, price, params)
                 if quantity:
                     notional = quantity * price
                     commission = _fee(notional, params.commission_rate, params.minimum_commission)
@@ -234,40 +268,59 @@ def run_backtest(
                     shares = quantity
                     position = _Position(bar.trade_date, quantity, notional + commission)
                     entry_atr = pending_atr
+                    entry_price = price
                     highest_price = bar.high
                     fees_total += commission
                     trades.append(Trade(bar.trade_date, signal_date, side, price, quantity, notional, commission, 0, reason))
             elif side == "sell" and position is not None and bar.trade_date > position.entry_date:
                 price = bar.open * (1 - params.slippage_rate)
-                notional = shares * price
-                commission = _fee(notional, params.commission_rate, params.minimum_commission)
-                stamp_duty = notional * params.stamp_duty_rate
-                cash += notional - commission - stamp_duty
-                fees_total += commission + stamp_duty
-                realized = notional - commission - stamp_duty - position.cost_basis + position.dividends
-                closed_trades.append(
-                    ClosedTrade(
-                        position.entry_date,
-                        bar.trade_date,
-                        shares,
-                        realized,
-                        realized / position.cost_basis if position.cost_basis else None,
-                        position.cost_basis,
-                    )
+                # 防御策略遵守 T+1；除权日新到账的股份不能随旧仓当天卖出。
+                sell_quantity = (
+                    shares - bonus_shares_added_today
+                    if params.strategy_code == "defensive_mean_reversion"
+                    else shares
                 )
-                trades.append(Trade(bar.trade_date, signal_date, side, price, shares, notional, commission, stamp_duty, reason))
-                shares = 0
-                position = None
-                entry_atr = None
-                highest_price = None
+                if sell_quantity > 0:
+                    notional = sell_quantity * price
+                    commission = _fee(notional, params.commission_rate, params.minimum_commission)
+                    stamp_duty = notional * params.stamp_duty_rate
+                    cash += notional - commission - stamp_duty
+                    fees_total += commission + stamp_duty
+                    realized = notional - commission - stamp_duty - position.cost_basis + position.dividends
+                    closed_trades.append(
+                        ClosedTrade(
+                            position.entry_date,
+                            bar.trade_date,
+                            sell_quantity,
+                            realized,
+                            realized / position.cost_basis if position.cost_basis else None,
+                            position.cost_basis,
+                        )
+                    )
+                    trades.append(Trade(bar.trade_date, signal_date, side, price, sell_quantity, notional, commission, stamp_duty, reason))
+                    shares -= sell_quantity
+                    if shares:
+                        # 新到账送转股与原仓成本分开，留到次日再撮合退出。
+                        position = _Position(bar.trade_date, shares, 0)
+                    else:
+                        position = None
+                        entry_atr = None
+                        entry_price = None
+                        highest_price = None
+                    if params.strategy_code == "defensive_mean_reversion":
+                        # 冷却从真实成交日起算；保留的新股次日再退出。
+                        last_exit_date = bar.trade_date
+                        bonus_liquidation_date = bar.trade_date if shares else None
             pending = None
             pending_atr = None
+            pending_position_ratio = None
 
         # 基准在首个回测日开盘买入并持有，费用与滑点参数和策略保持一致。
         if benchmark_holding_date is None:
             benchmark_cash, benchmark_shares, benchmark_holding_date = _buy_holdings(
                 benchmark_cash, benchmark_shares, benchmark_holding_date,
                 bar, params,
+                1.0 if params.strategy_code == "defensive_mean_reversion" else None,
             )
 
         market_value = shares * bar.close
@@ -283,8 +336,33 @@ def run_backtest(
         holdings_by_date[bar.trade_date] = shares
         benchmark_holdings_by_date[bar.trade_date] = benchmark_shares
 
-        # 日线回测在收盘后判定策略信号，下一交易日开盘执行；不读取未来 K 线。
-        if params.strategy_code == "breakout_ma_atr":
+        # 所有策略都在收盘后用已完成日线决策，防御策略不读取盘中执行报价。
+        if params.strategy_code == "defensive_mean_reversion":
+            if position is not None and bonus_liquidation_date == bar.trade_date:
+                # 送转股权益不等待 RSI/ATR 入场状态，在可交易的下一日退出。
+                pending = ("sell", bar.trade_date, "退出除权新增股份")
+            else:
+                decision = evaluate_defensive_mean_reversion(
+                    bars[:index + 1],
+                    position.entry_date if position else None,
+                    entry_price,
+                    entry_atr,
+                    last_exit_date,
+                    params.trend_ma_period,
+                    params.atr_period,
+                    params.atr_multiplier,
+                    params.max_holding_days,
+                    params.cooldown_days,
+                    params.target_annual_volatility,
+                    params.position_ratio,
+                )
+                if decision.action == "buy" and position is None:
+                    pending = ("buy", bar.trade_date, decision.reason)
+                    pending_atr = decision.entry_atr
+                    pending_position_ratio = decision.position_ratio
+                elif decision.action == "sell" and position is not None:
+                    pending = ("sell", bar.trade_date, decision.reason)
+        elif params.strategy_code == "breakout_ma_atr":
             if position is None:
                 required = max(params.ma_period, params.breakout_period, params.atr_period + 1)
                 atr = find_entry_atr(

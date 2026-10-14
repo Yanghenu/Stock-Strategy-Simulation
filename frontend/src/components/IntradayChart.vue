@@ -69,7 +69,7 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="intraday-chart-wrap">
-    <div v-if="loading && !bars.length" class="chart-overlay"><span class="spinner"></span> 正在载入今日分时</div>
+    <div v-if="loading && !bars.length" class="chart-overlay"><span class="spinner"></span> 正在载入最近交易日分时</div>
     <div v-else-if="!bars.length" class="chart-overlay">{{ error || emptyMessage }}</div>
     <div ref="host" class="chart-host intraday-chart"></div>
   </div>

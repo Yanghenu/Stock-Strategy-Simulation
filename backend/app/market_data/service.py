@@ -3,6 +3,7 @@
 import logging
 from dataclasses import replace
 from datetime import date, datetime, timedelta
+from time import monotonic
 from typing import Any, Callable
 from uuid import uuid4
 
@@ -14,6 +15,7 @@ from app.models import Bar, CorporateAction, IntradayBar, Quote
 from app.repositories.sql_repository import SqlRepository
 
 logger = logging.getLogger(__name__)
+_INTRADAY_FALLBACK_CACHE_SECONDS = 30
 
 
 class MarketDataServiceError(RuntimeError):
@@ -57,6 +59,8 @@ class MarketDataService:
         self._cache = cache
         self._settings = settings
         self._clock = clock or (lambda: datetime.now().astimezone())
+        # 休市时 2 秒轮询仍需快速探测当天数据，但历史回退只需每 30 秒重新查询一次。
+        self._intraday_fallback_cache: dict[str, tuple[float, list[IntradayBar]]] = {}
 
     def get_quote(self, symbol: str, force_refresh: bool = False) -> Quote:
         """从共享腾讯快照读取单股行情；手动刷新时更新一次全市场快照。"""
@@ -100,6 +104,22 @@ class MarketDataService:
         term = query.strip().casefold()
         matches = [item for item in quotes if not term or term in item.symbol or term in item.name.casefold()]
         return matches[: max(1, min(limit, 100))]
+
+    def get_screening_universe(self, limit: int, minimum_turnover: float) -> list[Quote]:
+        """复用完整行情快照，按流动性确定可复现的有界扫描池。"""
+
+        now = self._clock()
+        previous = self._cache.get_quotes()
+        # 每次创建扫描都重取收盘快照，避免 15:59 的 Redis 快照在 16:00 仍处于 TTL 内。
+        quotes = self._refresh_snapshot(previous, now)
+        # 外部源故障时可能退回旧快照；此时停止新扫描而不使用过期成交额。
+        if not quotes or any(item.stale for item in quotes):
+            raise MarketDataServiceError("全市场快照暂不可用或已过期，不能启动选股扫描")
+        eligible = [item for item in quotes if item.latest_price > 0 and item.volume_hands > 0
+                    and item.turnover >= minimum_turnover and "ST" not in item.name.upper()
+                    and len(item.symbol) == 6 and item.symbol.isdigit()]
+        eligible.sort(key=lambda item: (-item.turnover, item.symbol))
+        return eligible[:limit]
 
     def _refresh_snapshot(self, previous: list[Quote], now: datetime) -> list[Quote]:
         """通过 Redis 短租约合并并发刷新，只有整份快照成功才发布。"""
@@ -152,19 +172,58 @@ class MarketDataService:
         return bars
 
     def get_intraday_bars(self, symbol: str) -> list[IntradayBar]:
-        """只返回中国时区当天的分钟线，盘前和休市时允许空结果。"""
+        """优先返回当天分钟线；盘前或休市时回退到最近有数据的交易日。"""
 
         symbol = normalize_symbol(symbol)
         now = self._clock()
-        trade_date = now.astimezone(_CHINA_TZ).date() if now.tzinfo else now.date()
+        china_now = now.astimezone(_CHINA_TZ) if now.tzinfo else now.replace(tzinfo=_CHINA_TZ)
+        trade_date = china_now.date()
+        current_error: MarketDataSourceError | None = None
         try:
             bars = self._source.fetch_intraday_bars(symbol, trade_date)
         except MarketDataSourceError as exc:
-            raise MarketDataServiceError("实时分时行情暂时不可用，请稍后刷新") from exc
-        return sorted(
-            (bar for bar in bars if bar.trade_time.astimezone(_CHINA_TZ).date() == trade_date),
-            key=lambda bar: bar.trade_time,
-        )
+            current_error = exc
+
+        # 数据源的备用接口可能返回前一交易日；保留实际日期，不能强行改成当天。
+        session_bars = self._latest_intraday_session(bars if current_error is None else [], china_now)
+        if session_bars:
+            return session_bars
+
+        cached = self._intraday_fallback_cache.get(symbol)
+        if cached and monotonic() - cached[0] < _INTRADAY_FALLBACK_CACHE_SECONDS:
+            return list(cached[1])
+
+        try:
+            recent_bars = self._source.fetch_recent_intraday_bars(symbol, trade_date)
+        except MarketDataSourceError as exc:
+            logger.warning("股票 %s 最近交易日分时回查失败", symbol, exc_info=True)
+            if current_error:
+                raise MarketDataServiceError("实时分时行情暂时不可用，请稍后刷新") from exc
+            raise MarketDataServiceError("最近交易日分时行情暂时不可用，请稍后刷新") from exc
+
+        session_bars = self._latest_intraday_session(recent_bars, china_now)
+        self._intraday_fallback_cache[symbol] = (monotonic(), session_bars)
+        if session_bars:
+            return session_bars
+        if current_error:
+            raise MarketDataServiceError("实时分时行情暂时不可用，请稍后刷新") from current_error
+        return []
+
+    @staticmethod
+    def _latest_intraday_session(bars: list[IntradayBar], as_of: datetime) -> list[IntradayBar]:
+        """只保留查询时点之前最近一个中国交易日的分钟线，避免图表跨日拼接。"""
+
+        china_now = as_of.astimezone(_CHINA_TZ) if as_of.tzinfo else as_of.replace(tzinfo=_CHINA_TZ)
+        available: list[tuple[date, datetime, IntradayBar]] = []
+        for bar in bars:
+            stamp = bar.trade_time.astimezone(_CHINA_TZ) if bar.trade_time.tzinfo else bar.trade_time.replace(tzinfo=_CHINA_TZ)
+            if stamp <= china_now:
+                available.append((stamp.date(), stamp, bar))
+        if not available:
+            return []
+
+        latest_date = max(item[0] for item in available)
+        return [item[2] for item in sorted(available, key=lambda item: item[1]) if item[0] == latest_date]
 
     def ensure_stock(self, symbol: str) -> None:
         """回测入队前满足 SQL 外键；Redis 暂不可用时仍允许按代码建基础行。"""

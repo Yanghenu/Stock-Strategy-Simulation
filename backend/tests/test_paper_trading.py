@@ -2,6 +2,7 @@ import sys
 import unittest
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -10,7 +11,7 @@ from app.models import Quote
 from app.config import BacktestDefaults, DatabaseSettings, MarketDataSettings, PaperTradingSettings, RedisSettings, Settings
 from app.paper_trading.manager import CHINA_TZ, PaperTradingManager, is_new_live_quote
 from app.paper_trading.strategy import (
-    find_dual_ma_signal, find_entry_atr, get_strategy_catalog, rank_momentum_rotation,
+    DefensiveDecision, find_dual_ma_signal, find_entry_atr, get_strategy_catalog, rank_momentum_rotation,
     should_exit, trailing_stop,
 )
 
@@ -24,6 +25,18 @@ def make_bars(closes: list[float], high: float, low: float) -> list[Bar]:
         )
         for index, close in enumerate(closes)
     ]
+
+
+def make_weekday_bars(through: date, count: int = 151) -> list[Bar]:
+    """构造按交易日排列的日线，避免策略测试把周末误当成交易日。"""
+
+    days = []
+    cursor = through
+    while len(days) < count:
+        if cursor.weekday() < 5:
+            days.append(cursor)
+        cursor -= timedelta(days=1)
+    return [Bar(day, 10, 11, 9, 10, 10, 11, 9, 10) for day in reversed(days)]
 
 
 ROTATION_SYMBOLS = ["000333", "600000", "600028", "600276", "600887", "601899"]
@@ -58,12 +71,15 @@ class MemoryPaperRepository:
             "ma_period": 60, "breakout_period": 20, "atr_period": 20, "atr_multiplier": 2,
             "short_ma_period": 5, "long_ma_period": 20,
             "momentum_period_days": 20, "trend_ma_period": 60,
+            "max_holding_days": 5, "cooldown_days": 3,
+            "target_annual_volatility": 0.15, "max_position_ratio": 0.7,
             "max_positions": 3, "rebalance_interval_days": 7, "last_rebalanced_at": None,
         }
         self.symbol = {
             "symbol": "600000", "budget": 100000, "shares": 0, "entry_date": None,
             "entry_price": None, "cost_basis": 0, "highest_price": None, "atr_value": None,
             "last_price": None, "last_quote_at": last_quote_at,
+            "last_exit_date": None, "last_decision_date": None,
         }
         self.trades: list[dict[str, object]] = []
         self.sessions = [self.session]
@@ -75,6 +91,8 @@ class MemoryPaperRepository:
         self.stopped_sessions: list[str] = []
         self.equity_updates = 0
         self.rebalance_calls: list[dict[str, object]] = []
+        self.quote_calls: list[dict[str, object]] = []
+        self.reject_next_quote = False
         self.completed = False
 
     def add_session(
@@ -101,7 +119,8 @@ class MemoryPaperRepository:
     def get_paper_symbols(self, session_id: str):
         return [symbol.copy() for symbol in self.symbols_by_session[session_id]]
 
-    def apply_paper_quote(self, session_id, symbol, quote_at, state, cash, trade, processed_at=None):
+    def apply_paper_quote(self, session_id, symbol, quote_at, state, cash, trade, processed_at=None, decision_date=None):
+        self.quote_calls.append({"quote_at": quote_at, "cash": cash, "trade": trade, "decision_date": decision_date})
         session = next(session for session in self.sessions if session["session_id"] == session_id)
         ends_at = session.get("ends_at")
         if ends_at is not None and processed_at is not None:
@@ -114,8 +133,15 @@ class MemoryPaperRepository:
         row = next(row for row in self.symbols_by_session[session_id] if row["symbol"] == symbol)
         if row["last_quote_at"] and quote_at <= row["last_quote_at"]:
             return False
+        if decision_date and row.get("last_decision_date") and decision_date <= row["last_decision_date"]:
+            return False
+        if self.reject_next_quote:
+            self.reject_next_quote = False
+            return False
         row.update(state)
         row["last_quote_at"] = quote_at
+        if decision_date is not None:
+            row["last_decision_date"] = decision_date
         session = next(session for session in self.sessions if session["session_id"] == session_id)
         session["cash"] = cash
         if trade:
@@ -175,6 +201,14 @@ class MemoryPaperRepository:
             "short_ma_period": kwargs["short_ma_period"], "long_ma_period": kwargs["long_ma_period"],
             "momentum_period_days": kwargs.get("momentum_period_days", 20),
             "trend_ma_period": kwargs.get("trend_ma_period", 60),
+            "max_holding_days": kwargs.get("max_holding_days", 5),
+            "cooldown_days": kwargs.get("cooldown_days", 3),
+            "target_annual_volatility": kwargs.get("target_annual_volatility", 0.15),
+            "max_position_ratio": kwargs.get("max_position_ratio", 0.7),
+            "max_holding_days": kwargs.get("max_holding_days", 5),
+            "cooldown_days": kwargs.get("cooldown_days", 3),
+            "target_annual_volatility": kwargs.get("target_annual_volatility", 0.15),
+            "max_position_ratio": kwargs.get("max_position_ratio", 0.7),
             "max_positions": kwargs.get("max_positions", 3),
             "rebalance_interval_days": kwargs.get("rebalance_interval_days", 7),
             "last_rebalanced_at": None,
@@ -183,7 +217,8 @@ class MemoryPaperRepository:
         self.symbols_by_session[session_id] = [
             {"symbol": symbol, "budget": budget, "shares": 0, "entry_date": None,
              "entry_price": None, "cost_basis": 0, "highest_price": None, "atr_value": None,
-             "last_price": None, "last_quote_at": None}
+             "last_price": None, "last_quote_at": None,
+             "last_exit_date": None, "last_decision_date": None}
             for symbol, budget in symbol_budgets
         ]
         self.trades_by_session[session_id] = []
@@ -217,6 +252,7 @@ class MemoryPaperMarketData:
         self.force_refresh_values: list[bool] = []
         self.quote_calls: list[str] = []
         self.ensured_symbols: list[str] = []
+        self.get_bars_calls: list[tuple[str, date, date]] = []
         self.after_bars = None
 
     def get_quote(self, symbol: str, force_refresh: bool = False):
@@ -227,6 +263,7 @@ class MemoryPaperMarketData:
         return self.quotes_by_symbol.get(symbol, self.quote)
 
     def get_bars(self, symbol: str, _start: date, _end: date):
+        self.get_bars_calls.append((symbol, _start, _end))
         bars = self.bars_by_symbol.get(symbol, self.bars)
         if self.after_bars:
             self.after_bars()
@@ -266,12 +303,12 @@ class PaperStrategyTests(unittest.TestCase):
 
         self.assertEqual(find_dual_ma_signal(bars, 2, 1, 2), "sell")
 
-    def test_strategy_catalog_contains_three_supported_default_strategies(self) -> None:
+    def test_strategy_catalog_contains_supported_default_strategies(self) -> None:
         catalog = get_strategy_catalog()
 
         self.assertEqual(
             {item["code"] for item in catalog},
-            {"breakout_ma_atr", "dual_ma", "momentum_rotation"},
+            {"breakout_ma_atr", "defensive_mean_reversion", "dual_ma", "momentum_rotation"},
         )
         dual_ma = next(item for item in catalog if item["code"] == "dual_ma")
         self.assertEqual((dual_ma["short_ma_period"], dual_ma["long_ma_period"]), (5, 20))
@@ -709,6 +746,200 @@ class PaperStrategyTests(unittest.TestCase):
         self.assertEqual(args[8:12], (45, 15, 12, 2.5))
         self.assertEqual(kwargs["short_ma_period"], 5)
         self.assertEqual(kwargs["long_ma_period"], 20)
+
+    def test_defensive_experiment_persists_parameters_and_equal_independent_budgets(self) -> None:
+        started = datetime(2026, 10, 12, 9, 30, tzinfo=CHINA_TZ)
+        repository = MemoryPaperRepository()
+        manager = PaperTradingManager(
+            repository, MemoryPaperMarketData(Quote(
+                "600000", "浦发银行", 10, 0, 0, 0, 0, 0, 10, 100, 100000,
+                "测试行情", started, False,
+            ), []), paper_settings(), clock=lambda: started,
+        )
+
+        session_id = manager.create_experiment(
+            "防御策略", ["600000", "600028"], "defensive_mean_reversion", 100000,
+            {"trend_ma_period": 100, "max_holding_days": 8, "cooldown_days": 4,
+             "target_annual_volatility": 0.12, "max_position_ratio": 0.6},
+        )
+
+        session = repository.get_paper_session(session_id)
+        rows = repository.get_paper_symbols(session_id)
+        args, kwargs = repository.created[-1]
+        self.assertEqual([row["budget"] for row in rows], [50000, 50000])
+        self.assertEqual(
+            [session[key] for key in (
+                "trend_ma_period", "max_holding_days", "cooldown_days",
+                "target_annual_volatility", "max_position_ratio",
+            )],
+            [100, 8, 4, 0.12, 0.6],
+        )
+        self.assertEqual(kwargs["max_holding_days"], 8)
+        self.assertEqual(kwargs["cooldown_days"], 4)
+        self.assertEqual(kwargs["target_annual_volatility"], 0.12)
+        self.assertEqual(kwargs["max_position_ratio"], 0.6)
+        self.assertEqual(args[12], [("600000", 50000), ("600028", 50000)])
+
+    def test_defensive_signal_runs_once_per_closed_bar_and_later_quote_only_marks_value(self) -> None:
+        # 报价日期为周二、周三；两次查询都以周一收盘日线作出同一个信号。
+        monday = date(2026, 10, 12)
+        started = datetime(2026, 10, 13, 10, 0, tzinfo=CHINA_TZ)
+        quote_one = Quote("600000", "浦发银行", 12, 0, 0, 0, 0, 0, 12, 100, 1200,
+                          "测试行情", started + timedelta(minutes=1), False)
+        quote_two = Quote(**{**quote_one.__dict__, "latest_price": 13,
+                             "fetched_at": started + timedelta(days=1, minutes=1)})
+        repository = MemoryPaperRepository()
+        repository.session.update({"ends_at": None, "strategy_code": "defensive_mean_reversion"})
+        repository.symbol["budget"] = 50000
+        signal_bars = make_weekday_bars(monday)
+        market_data = MemoryPaperMarketData(
+            quote_one, signal_bars, quotes_by_symbol={"600000": quote_one},
+        )
+        manager = PaperTradingManager(repository, market_data, paper_settings(), clock=lambda: started)
+        session = repository.session
+        session.update({"trend_ma_period": 120, "atr_period": 14, "atr_multiplier": 2,
+                        "max_holding_days": 5, "cooldown_days": 3,
+                        "target_annual_volatility": 0.15, "max_position_ratio": 0.7})
+
+        evaluator_calls = []
+
+        def decide(bars, *args):
+            evaluator_calls.append((bars, args))
+            return DefensiveDecision("buy", "oversold_mean_reversion", 1.5, 0.7)
+
+        with patch("app.paper_trading.manager.evaluate_defensive_mean_reversion", side_effect=decide):
+            manager.run_cycle()
+
+        self.assertEqual(repository.symbol["last_decision_date"], monday)
+        self.assertEqual(repository.quote_calls[0]["decision_date"], monday)
+        self.assertEqual(repository.quote_calls[0]["trade"]["signal_date"], monday)
+        self.assertEqual(evaluator_calls[0][0][-1].trade_date, monday)
+        self.assertEqual(repository.trades[0]["execution_price"], 12 * (1 + repository.session["slippage_rate"]))
+        self.assertEqual(repository.trades[0]["quantity"], 2900)
+
+        market_data.quotes_by_symbol["600000"] = quote_two
+        with patch("app.paper_trading.manager.evaluate_defensive_mean_reversion", side_effect=decide) as evaluator:
+            manager.run_cycle()
+
+        self.assertEqual(len(repository.trades), 1)
+        self.assertEqual(repository.quote_calls[1]["decision_date"], None)
+        self.assertEqual(repository.symbol["last_price"], 13)
+        evaluator.assert_not_called()
+
+    def test_defensive_history_cache_separates_400_day_window_from_legacy_window(self) -> None:
+        day = date(2026, 10, 14)
+        quote = Quote("600000", "浦发银行", 10, 0, 0, 0, 0, 0, 10, 100, 1000,
+                      "测试行情", datetime(2026, 10, 14, 10, 0, tzinfo=CHINA_TZ), False)
+        market_data = MemoryPaperMarketData(quote, [])
+        manager = PaperTradingManager(MemoryPaperRepository(), market_data, paper_settings())
+
+        manager._history_before("600000", day)
+        manager._history_before("600000", day, history_days=400)
+
+        self.assertEqual(len(market_data.get_bars_calls), 2)
+        self.assertEqual(market_data.get_bars_calls[0][1], day - timedelta(days=220))
+        self.assertEqual(market_data.get_bars_calls[1][1], day - timedelta(days=400))
+
+    def test_defensive_sell_persists_execution_day_and_restart_keeps_cooldown_state(self) -> None:
+        monday = date(2026, 10, 12)
+        friday = date(2026, 10, 9)
+        now = [datetime(2026, 10, 12, 10, 0, tzinfo=CHINA_TZ)]
+        quote_mon = Quote("600000", "浦发银行", 9, 0, 0, 0, 0, 0, 9, 100, 900,
+                          "测试行情", now[0] + timedelta(minutes=1), False)
+        quote_tue = Quote(**{**quote_mon.__dict__, "latest_price": 9.5,
+                             "fetched_at": datetime(2026, 10, 13, 10, 1, tzinfo=CHINA_TZ)})
+        bars = make_weekday_bars(monday)
+        repository = MemoryPaperRepository()
+        repository.session.update({"ends_at": None, "strategy_code": "defensive_mean_reversion", "cash": 0})
+        repository.symbol.update({"shares": 100, "entry_date": date(2026, 10, 8), "entry_price": 10,
+                                  "cost_basis": 1000, "highest_price": 11, "atr_value": 1})
+        repository.session.update({"trend_ma_period": 120, "atr_period": 14, "atr_multiplier": 2,
+                                   "max_holding_days": 5, "cooldown_days": 3,
+                                   "target_annual_volatility": 0.15, "max_position_ratio": 0.7})
+        market = MemoryPaperMarketData(quote_mon, bars, quotes_by_symbol={"600000": quote_mon})
+        manager = PaperTradingManager(repository, market, paper_settings(), clock=lambda: now[0])
+        evaluator_inputs = []
+
+        def sell(bars, *args):
+            evaluator_inputs.append(args[3])
+            return DefensiveDecision("sell", "mean_reversion")
+
+        with patch("app.paper_trading.manager.evaluate_defensive_mean_reversion", side_effect=sell):
+            manager.run_cycle()
+
+        self.assertEqual(repository.symbol["last_exit_date"], monday)
+        self.assertEqual(repository.trades[0]["side"], "sell")
+        self.assertEqual(repository.trades[0]["signal_date"], friday)
+
+        market.quotes_by_symbol["600000"] = quote_tue
+        restarted = PaperTradingManager(repository, market, paper_settings(), clock=lambda: now[0])
+        with patch("app.paper_trading.manager.evaluate_defensive_mean_reversion", side_effect=lambda bars, *args: (
+            evaluator_inputs.append(args[3]) or DefensiveDecision(None, "cooldown")
+        )):
+            restarted._process_started_at = datetime(2026, 10, 13, 9, 30, tzinfo=CHINA_TZ)
+            restarted.run_cycle()
+
+        self.assertEqual(evaluator_inputs, [None, monday])
+        self.assertEqual(repository.symbol["last_decision_date"], monday)
+
+    def test_defensive_duplicate_transaction_rejection_does_not_change_account(self) -> None:
+        monday = date(2026, 10, 12)
+        now = datetime(2026, 10, 13, 10, 0, tzinfo=CHINA_TZ)
+        quote = Quote("600000", "浦发银行", 10, 0, 0, 0, 0, 0, 10, 100, 1000,
+                      "测试行情", now + timedelta(minutes=1), False)
+        bars = make_weekday_bars(monday)
+        repository = MemoryPaperRepository()
+        repository.session.update({"ends_at": None, "strategy_code": "defensive_mean_reversion"})
+        repository.symbol["budget"] = 50000
+        repository.session.update({"trend_ma_period": 120, "atr_period": 14, "atr_multiplier": 2,
+                                   "max_holding_days": 5, "cooldown_days": 3,
+                                   "target_annual_volatility": 0.15, "max_position_ratio": 0.7})
+        repository.reject_next_quote = True
+        manager = PaperTradingManager(repository, MemoryPaperMarketData(quote, bars), paper_settings(), clock=lambda: now)
+
+        with patch("app.paper_trading.manager.evaluate_defensive_mean_reversion",
+                   return_value=DefensiveDecision("buy", "oversold_mean_reversion", 1, 0.5)):
+            manager.run_cycle()
+
+        self.assertEqual(repository.session["cash"], 100000)
+        self.assertEqual(repository.symbol["shares"], 0)
+        self.assertEqual(repository.trades, [])
+
+    def test_defensive_no_trade_signal_still_persists_processed_signal_date(self) -> None:
+        monday = date(2026, 10, 12)
+        now = datetime(2026, 10, 13, 10, 0, tzinfo=CHINA_TZ)
+        quote = Quote("600000", "浦发银行", 10, 0, 0, 0, 0, 0, 10, 100, 1000,
+                      "测试行情", now + timedelta(minutes=1), False)
+        repository = MemoryPaperRepository()
+        repository.session.update({"ends_at": None, "strategy_code": "defensive_mean_reversion"})
+        repository.session.update({"trend_ma_period": 120, "atr_period": 14, "atr_multiplier": 2,
+                                   "max_holding_days": 5, "cooldown_days": 3,
+                                   "target_annual_volatility": 0.15, "max_position_ratio": 0.7})
+        manager = PaperTradingManager(
+            repository, MemoryPaperMarketData(quote, make_weekday_bars(monday)),
+            paper_settings(), clock=lambda: now,
+        )
+
+        with patch("app.paper_trading.manager.evaluate_defensive_mean_reversion",
+                   return_value=DefensiveDecision(None, "trend_filter_failed")):
+            manager.run_cycle()
+
+        self.assertEqual(repository.symbol["last_decision_date"], monday)
+        self.assertEqual(repository.trades, [])
+
+    def test_defensive_restarted_worker_rejects_quote_fetched_before_start(self) -> None:
+        started = datetime(2026, 10, 13, 9, 30, tzinfo=CHINA_TZ)
+        cached = Quote("600000", "浦发银行", 10, 0, 0, 0, 0, 0, 10, 100, 1000,
+                       "测试行情", started - timedelta(seconds=1), False)
+        repository = MemoryPaperRepository()
+        repository.session.update({"ends_at": None, "strategy_code": "defensive_mean_reversion"})
+        manager = PaperTradingManager(repository, MemoryPaperMarketData(cached, []), paper_settings(), clock=lambda: started)
+
+        with patch("app.paper_trading.manager.evaluate_defensive_mean_reversion") as evaluator:
+            manager.run_cycle()
+
+        evaluator.assert_not_called()
+        self.assertEqual(repository.quote_calls, [])
 
     def test_create_experiment_rejects_invalid_parameter_relationships(self) -> None:
         repository = MemoryPaperRepository()

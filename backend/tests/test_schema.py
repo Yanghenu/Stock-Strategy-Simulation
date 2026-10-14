@@ -3,6 +3,23 @@ from pathlib import Path
 
 
 class SqlSchemaTests(unittest.TestCase):
+    def test_defensive_columns_exist_in_creation_and_idempotent_migrations(self) -> None:
+        schema = (Path(__file__).resolve().parents[1] / "sql" / "schema.sql").read_text(encoding="utf-8")
+        # 每个独立列必须同时支持新库建表与旧库幂等升级，禁止借用 JSON 保存策略状态。
+        columns = {
+            "backtest_runs": ("max_holding_days", "cooldown_days", "target_annual_volatility"),
+            "paper_sessions": ("max_holding_days", "cooldown_days", "target_annual_volatility", "max_position_ratio"),
+            "paper_session_symbols": ("last_exit_date", "last_decision_date"),
+            "paper_trades": ("signal_date",),
+        }
+        for table, names in columns.items():
+            creation = schema.split(f"CREATE TABLE dbo.{table} (", 1)[1].split("\n    );", 1)[0]
+            for name in names:
+                with self.subTest(table=table, column=name):
+                    self.assertIn(name, creation)
+                    self.assertIn(f"COL_LENGTH(N'dbo.{table}', N'{name}') IS NULL", schema)
+        self.assertNotRegex(schema, r"(?i)\bJSON\s*(?:,|\)|NULL|NOT NULL)")
+
     def test_schema_has_normalized_tables_and_no_json_column_type(self) -> None:
         schema = (Path(__file__).resolve().parents[1] / "sql" / "schema.sql").read_text(encoding="utf-8")
 

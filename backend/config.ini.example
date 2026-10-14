@@ -63,3 +63,12 @@ stamp_duty_rate = 0
 slippage_rate = 0.0005
 subscription_fee_rate = 0.0015
 redemption_fee_rate = 0.005
+
+[stock_screen]
+; 批量扫描仅在收盘后启动，逐股日线请求会按间隔执行，避免占满现有实验行情通道。
+default_universe_size = 500
+max_universe_size = 2000
+minimum_turnover = 10000000
+candidate_count = 20
+request_gap_seconds = 0.3
+worker_interval_seconds = 300

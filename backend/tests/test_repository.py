@@ -113,6 +113,146 @@ def bar() -> Bar:
 
 
 class SqlRepositoryTests(unittest.TestCase):
+    def test_defensive_parameters_are_bound_for_backtests_and_paper_sessions(self) -> None:
+        connection = FakeConnection()
+        repository = SqlRepository(settings(), connection_factory=lambda: connection)
+        params = BacktestParams("600000", date(2024, 1, 1), date(2024, 3, 1), 5, 20, 100000,
+                                max_holding_days=8, cooldown_days=4, target_annual_volatility=0.18)
+        repository.create_backtest("run-id", params)
+        sql, values = connection.cursor_instance.calls[0]
+        for column, value in (("max_holding_days", 8), ("cooldown_days", 4), ("target_annual_volatility", 0.18)):
+            self.assertIn(column, sql)
+            self.assertIn(value, values)
+        self.assertEqual(sql.count("?"), len(values))
+        connection.cursor_instance.calls.clear()
+        repository.create_paper_session("paper-id", datetime(2026, 10, 12), None, 100000,
+                                        0.0003, 5, 0.001, 0.0005, 60, 20, 20, 2, [("600000", 100000)],
+                                        max_holding_days=8, cooldown_days=4,
+                                        target_annual_volatility=0.18, max_position_ratio=0.6)
+        sql, values = connection.cursor_instance.calls[0]
+        self.assertIn("max_position_ratio", sql)
+        self.assertEqual(values[-4:], (8, 4, 0.18, 0.6))
+        self.assertEqual(sql.count("?"), len(values))
+
+    def test_duplicate_or_older_signal_date_rejects_all_writes_under_lock(self) -> None:
+        # 行情时间更新不能绕过信号日期防重，拒绝后现金、持仓及成交都不得变化。
+        for decision in (date(2026, 10, 12), date(2026, 10, 11)):
+            with self.subTest(decision=decision):
+                connection = FakeConnection()
+                connection.cursor_instance.fetchone_queue = [("running", None), (None, date(2026, 10, 12))]
+                repository = SqlRepository(settings(), connection_factory=lambda: connection)
+                applied = repository.apply_paper_quote("paper-id", "600000", datetime(2026, 10, 13),
+                                                       {}, 0, {}, decision_date=decision)
+                self.assertFalse(applied)
+                self.assertFalse(any("UPDATE" in sql or "INSERT" in sql for sql, _ in connection.cursor_instance.calls))
+                self.assertIn("UPDLOCK, HOLDLOCK", connection.cursor_instance.calls[1][0])
+
+    def test_new_signal_date_is_saved_even_without_a_trade(self) -> None:
+        connection = FakeConnection()
+        connection.cursor_instance.fetchone_queue = [("running", None), (None, None)]
+        repository = SqlRepository(settings(), connection_factory=lambda: connection)
+        state = {"shares": 0, "entry_date": None, "entry_price": None, "cost_basis": 0,
+                 "highest_price": None, "atr_value": None, "last_price": 10,
+                 "last_exit_date": date(2026, 10, 9)}
+        self.assertTrue(repository.apply_paper_quote("paper-id", "600000", datetime(2026, 10, 13),
+                                                     state, 100000, None, decision_date=date(2026, 10, 12)))
+        sql, values = next(call for call in connection.cursor_instance.calls if "UPDATE dbo.paper_session_symbols" in call[0])
+        self.assertIn("last_decision_date", sql)
+        self.assertIn(date(2026, 10, 12), values)
+        self.assertIn(date(2026, 10, 9), values)
+        self.assertEqual(sql.count("?"), len(values))
+        self.assertFalse(any("INSERT INTO dbo.paper_trades" in sql for sql, _ in connection.cursor_instance.calls))
+
+    def test_signal_date_trade_and_old_path_dates_use_bound_parameters(self) -> None:
+        for decision in (date(2026, 10, 12), None):
+            with self.subTest(decision=decision):
+                connection = FakeConnection()
+                connection.cursor_instance.fetchone_queue = [("running", None), (None, date(2026, 10, 9))]
+                repository = SqlRepository(settings(), connection_factory=lambda: connection)
+                state = {"shares": 100, "entry_date": date(2026, 10, 13), "entry_price": 10,
+                         "cost_basis": 1005, "highest_price": 10, "atr_value": None, "last_price": 10}
+                trade = {"side": "buy", "execution_price": 10, "quantity": 100,
+                         "notional": 1000, "commission": 5, "stamp_duty": 0, "reason": "防御买入"}
+                self.assertTrue(repository.apply_paper_quote("paper-id", "600000", datetime(2026, 10, 13),
+                                                             state, 98995, trade, decision_date=decision))
+                sql, values = next(call for call in connection.cursor_instance.calls if "INSERT INTO dbo.paper_trades" in call[0])
+                self.assertIn("signal_date", sql)
+                self.assertEqual(values[-1], decision)
+                self.assertEqual(sql.count("?"), len(values))
+                update_sql, update_values = next(call for call in connection.cursor_instance.calls if "UPDATE dbo.paper_session_symbols" in call[0])
+                self.assertIn("last_exit_date=COALESCE", update_sql)
+                self.assertIsNone(update_values[8])
+                self.assertEqual(update_values[9], decision)
+                self.assertTrue(connection.committed)
+                if decision is not None:
+                    # 第二次报价更晚，但数据库已保存同一信号日；只能保留第一笔成交和现金写入。
+                    connection.cursor_instance.fetchone_queue = [
+                        ("running", None), (datetime(2026, 10, 13), decision),
+                    ]
+                    self.assertFalse(repository.apply_paper_quote("paper-id", "600000", datetime(2026, 10, 14),
+                                                                  state, 97990, trade, decision_date=decision))
+                    self.assertEqual(sum("INSERT INTO dbo.paper_trades" in sql for sql, _ in connection.cursor_instance.calls), 1)
+                    self.assertEqual(sum("UPDATE dbo.paper_sessions SET cash" in sql for sql, _ in connection.cursor_instance.calls), 1)
+
+    def test_paper_symbol_date_columns_are_mapped_with_nullable_legacy_rows(self) -> None:
+        connection = FakeConnection()
+        connection.cursor_instance.rows = [
+            ("600000", "浦发银行", 100000, 0, None, None, 0, None, None, 10, None,
+             date(2026, 10, 9), date(2026, 10, 12)),
+            ("600028", "中国石化", 100000, 0, None, None, 0, None, None, 6, None, None, None),
+        ]
+        rows = SqlRepository(settings(), connection_factory=lambda: connection).get_paper_symbols("paper-id")
+        self.assertEqual(rows[0]["last_exit_date"], date(2026, 10, 9))
+        self.assertEqual(rows[0]["last_decision_date"], date(2026, 10, 12))
+        self.assertIsNone(rows[1]["last_exit_date"])
+        self.assertIsNone(rows[1]["last_decision_date"])
+
+    def test_paper_detail_maps_parameters_symbol_dates_and_trade_signal(self) -> None:
+        class DetailCursor(FakeCursor):
+            def execute(self, sql: str, parameters: object = None) -> None:
+                super().execute(sql, parameters)
+                if "FROM dbo.paper_sessions WHERE" in sql:
+                    self.single_row = ("paper-id", "防御任务", "defensive_mean_reversion", "running",
+                                       datetime(2026, 10, 12), None, None, 100000, 100000,
+                                       60, 20, 20, 2, 0.0003, 5, 0.001, 0.0005, 5, 20, 20, 60, 3, 7,
+                                       None, None, 8, 4, 0.18, 0.6)
+                elif "FROM dbo.paper_session_symbols" in sql:
+                    self.rows = [("600000", "浦发银行", 100000, 0, None, None, 0, None, None, 10,
+                                  datetime(2026, 10, 13), date(2026, 10, 9), date(2026, 10, 12))]
+                elif "FROM dbo.paper_equity" in sql:
+                    self.rows = []
+                elif "FROM dbo.paper_trades" in sql:
+                    self.rows = [("600000", datetime(2026, 10, 13), "buy", 10, 100, 1000, 5, 0,
+                                  "防御买入", date(2026, 10, 12))]
+
+        connection = FakeConnection()
+        connection.cursor_instance = DetailCursor()
+        detail = SqlRepository(settings(), connection_factory=lambda: connection).get_paper_session("paper-id")
+        self.assertEqual(detail["max_holding_days"], 8)
+        self.assertEqual(detail["cooldown_days"], 4)
+        self.assertEqual(detail["target_annual_volatility"], 0.18)
+        self.assertEqual(detail["max_position_ratio"], 0.6)
+        self.assertEqual(detail["symbols"][0]["last_exit_date"], date(2026, 10, 9))
+        self.assertEqual(detail["symbols"][0]["last_decision_date"], date(2026, 10, 12))
+        self.assertEqual(detail["trades"][0]["signal_date"], date(2026, 10, 12))
+
+    def test_signal_day_trade_failure_rolls_back_position_cash_and_decision(self) -> None:
+        connection = FakeConnection()
+        connection.cursor_instance.fetchone_queue = [("running", None), (None, None)]
+        connection.cursor_instance.fail_on_sql = "INSERT INTO dbo.paper_trades"
+        state = {"shares": 100, "entry_date": date(2026, 10, 13), "entry_price": 10,
+                 "cost_basis": 1005, "highest_price": 10, "atr_value": None, "last_price": 10}
+        trade = {"side": "buy", "execution_price": 10, "quantity": 100,
+                 "notional": 1000, "commission": 5, "stamp_duty": 0, "reason": "防御买入"}
+        with self.assertLogs("app.repositories.sql_repository", level="ERROR"):
+            with self.assertRaisesRegex(RuntimeError, "database write failed"):
+                SqlRepository(settings(), connection_factory=lambda: connection).apply_paper_quote(
+                    "paper-id", "600000", datetime(2026, 10, 13), state, 98995, trade,
+                    decision_date=date(2026, 10, 12))
+        self.assertTrue(connection.rolled_back)
+        self.assertFalse(connection.committed)
+        self.assertTrue(connection.closed)
+
     def test_creates_run_with_bound_strategy_and_fee_parameters(self) -> None:
         connection = FakeConnection()
         repository = SqlRepository(settings(), connection_factory=lambda: connection)
@@ -186,7 +326,7 @@ class SqlRepositoryTests(unittest.TestCase):
 
     def test_paper_quote_update_is_idempotent_by_source_timestamp(self) -> None:
         connection = FakeConnection()
-        connection.cursor_instance.fetchone_queue = [("running", None), (None,)]
+        connection.cursor_instance.fetchone_queue = [("running", None), (None, None)]
         repository = SqlRepository(settings(), connection_factory=lambda: connection)
         quote_time = datetime(2026, 10, 12, 6, 55)
         state = {
@@ -204,7 +344,7 @@ class SqlRepositoryTests(unittest.TestCase):
         self.assertTrue(connection.committed)
 
         duplicate_cursor = FakeCursor()
-        duplicate_cursor.fetchone_queue = [("running", None), (quote_time,)]
+        duplicate_cursor.fetchone_queue = [("running", None), (quote_time, None)]
         duplicate_connection = FakeConnection()
         duplicate_connection.cursor_instance = duplicate_cursor
         duplicate_repository = SqlRepository(settings(), connection_factory=lambda: duplicate_connection)
@@ -235,6 +375,7 @@ class SqlRepositoryTests(unittest.TestCase):
             "symbol": "600000", "quote_fetched_at": quote_time, "side": "buy",
             "execution_price": 10.0, "quantity": 100, "notional": 1000,
             "commission": 5, "stamp_duty": 0, "reason": "强弱轮动买入",
+            "signal_date": date(2026, 10, 9),
         }]
 
         applied = repository.apply_paper_rebalance(
@@ -247,6 +388,14 @@ class SqlRepositoryTests(unittest.TestCase):
         self.assertTrue(any("INSERT INTO dbo.paper_trades" in sql for sql in sql_calls))
         self.assertTrue(any("last_rebalanced_at=COALESCE" in sql for sql in sql_calls))
         self.assertTrue(any("MERGE dbo.paper_equity" in sql for sql in sql_calls))
+        trade_sql, trade_values = next(call for call in connection.cursor_instance.calls if "INSERT INTO dbo.paper_trades" in call[0])
+        self.assertEqual(trade_values[-1], date(2026, 10, 9))
+        self.assertEqual(trade_sql.count("?"), len(trade_values))
+        update_sql, update_values = next(call for call in connection.cursor_instance.calls if "UPDATE dbo.paper_session_symbols" in call[0])
+        self.assertIn("last_decision_date=COALESCE", update_sql)
+        self.assertIsNone(update_values[9])
+        self.assertIsNone(update_values[10])
+        self.assertEqual(update_sql.count("?"), len(update_values))
         self.assertTrue(connection.committed)
         self.assertFalse(connection.rolled_back)
 
@@ -367,6 +516,7 @@ class SqlRepositoryTests(unittest.TestCase):
             (
                 "paper-id", "多任务", "dual_ma", datetime(2026, 10, 12), None, 100000, 90000,
                 0.0003, 5, 0.001, 0.0005, 60, 20, 20, 2.0, 5, 20, 20, 60, 3, 7, None,
+                8, 4, 0.18, 0.6,
             ),
         ]
         repository = SqlRepository(settings(), connection_factory=lambda: connection)
@@ -382,6 +532,10 @@ class SqlRepositoryTests(unittest.TestCase):
         self.assertEqual(sessions[0]["max_positions"], 3)
         self.assertEqual(sessions[0]["rebalance_interval_days"], 7)
         self.assertIsNone(sessions[0]["last_rebalanced_at"])
+        self.assertEqual(sessions[0]["max_holding_days"], 8)
+        self.assertEqual(sessions[0]["cooldown_days"], 4)
+        self.assertEqual(sessions[0]["target_annual_volatility"], 0.18)
+        self.assertEqual(sessions[0]["max_position_ratio"], 0.6)
         sql, _ = connection.cursor_instance.calls[0]
         self.assertNotIn("TOP (1)", sql)
 
@@ -461,7 +615,7 @@ class SqlRepositoryTests(unittest.TestCase):
             "run-id", "600000", date(2024, 1, 1), date(2024, 1, 31), "dual_moving_average",
             5, 20, 60, 20, 20, 2, 20, 60, 3, 7,
             100000, 1, 0.0003, 5, 0.001, 0.0005, "completed", 100,
-            0.1, 0.2, -0.05, 0.12, 1.2, 1.0, 1, 5, 0, 0.05, None, date(2024, 1, 1),
+            0.1, 0.2, -0.05, 0.12, 1.2, 1.0, 1, 5, 0, 0.05, None, date(2024, 1, 1), 8, 4, 0.18,
         )
         cursor = QueryCursor(
             run_row,
@@ -476,6 +630,9 @@ class SqlRepositoryTests(unittest.TestCase):
         record = repository.get_backtest("run-id")
 
         self.assertEqual(record["status"], "completed")  # type: ignore[index]
+        self.assertEqual(record["max_holding_days"], 8)
+        self.assertEqual(record["cooldown_days"], 4)
+        self.assertEqual(record["target_annual_volatility"], 0.18)
         self.assertEqual(len(record["equity_curve"]), 1)  # type: ignore[index]
         self.assertEqual(record["trades"][0]["side"], "buy")  # type: ignore[index]
         self.assertEqual(record["trades"][0]["symbol"], "600000")  # type: ignore[index]
@@ -488,7 +645,7 @@ class SqlRepositoryTests(unittest.TestCase):
             5, 20, 60, 20, 20, 2, 20, 60, 3, 7,
             100000, 1, 0.0003, 5, 0.001, 0.0005, "running", 35,
             None, None, None, None, None, None, None, None, None, None, None,
-            None, date(2024, 1, 1),
+            None, date(2024, 1, 1), 5, 3, 0.15,
         )
         cursor = QueryCursor(row, [], [], [])
         connection = FakeConnection()

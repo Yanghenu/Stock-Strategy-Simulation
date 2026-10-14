@@ -9,13 +9,14 @@ import MarketChart from './components/MarketChart.vue'
 import PaperExperimentCenter from './components/PaperExperimentCenter.vue'
 import QuoteCard from './components/QuoteCard.vue'
 import StockSearch from './components/StockSearch.vue'
+import StockScreenCenter from './components/StockScreenCenter.vue'
 import TradeTable from './components/TradeTable.vue'
 import { findExactStockName } from './utils/stockLookup'
 import type { AppConfig, BacktestRecord, BacktestSummary, Bar, IntradayBar, PaperStrategy, Quote, WatchedStock } from './types'
-import { aggregateIntradayOhlc, mergeLiveDailyBar } from './market-chart-utils'
+import { aggregateIntradayOhlc, intradayDisplayLabels, mergeLiveDailyBar } from './market-chart-utils'
 import { intradayRefreshIntervalMs } from './utils/marketRefresh'
 
-type ViewName = 'market' | 'backtest' | 'paper' | 'history' | 'fund-market' | 'fund-paper'
+type ViewName = 'market' | 'backtest' | 'paper' | 'history' | 'fund-market' | 'fund-paper' | 'stock-screen'
 const view = ref<ViewName>('market')
 const config = ref<AppConfig | null>(null)
 const quote = ref<Quote | null>(null)
@@ -124,6 +125,10 @@ function strategyName(code: string): string {
   return backtestStrategies.value.find((item) => item.code === code)?.name ||
     (code === 'dual_moving_average' ? '双均线交叉' : code)
 }
+function benchmarkName(code: string | undefined): string {
+  return code === 'defensive_mean_reversion' ? '全仓买入持有'
+    : code === 'momentum_rotation' ? '股票池等权买入持有' : '买入持有'
+}
 const canCancel = computed(() => isRunning.value && !cancelling.value)
 const backtestStockLabel = computed(() => {
   if (quote.value?.symbol === form.symbol) return quote.value.name
@@ -151,11 +156,8 @@ const marketRangeLabel = computed(() => liveDailyBars.value.length
   ? `${liveDailyBars.value[0].trade_date} — ${liveDailyBars.value[liveDailyBars.value.length - 1].trade_date}`
   : '等待行情数据')
 const isCurrentWatched = computed(() => !!quote.value && watchlist.value.some((item) => item.symbol === quote.value?.symbol))
-const intradayLatestLabel = computed(() => {
-  const latest = intradayBars.value.at(-1)?.trade_time
-  return latest ? `最新分钟 ${latest.slice(11, 16)}` : '等待今日分时'
-})
-const intradayEmptyMessage = '今日暂无分钟数据，盘前、休市日或数据源尚未发布时会显示为空。'
+const intradayLabels = computed(() => intradayDisplayLabels(intradayBars.value, isoDate(new Date())))
+const intradayEmptyMessage = '近 14 天没有可用分钟记录，可能是休市时间较长或数据源暂未返回。'
 
 async function loadQuote(symbol: string, keepError = false, forceRefresh = false, requestSequence = marketRequestSequence) {
   if (!keepError) errorMessage.value = ''
@@ -394,6 +396,10 @@ async function loadRun(runId: string) {
       atr_period: record.atr_period, atr_multiplier: record.atr_multiplier,
       momentum_period_days: record.momentum_period_days, trend_ma_period: record.trend_ma_period,
       max_positions: record.max_positions, rebalance_interval_days: record.rebalance_interval_days,
+      // 防御策略参数由目录定义，档案详情中的独立列用于恢复用户原值。
+      max_holding_days: record.max_holding_days, cooldown_days: record.cooldown_days,
+      target_annual_volatility: record.target_annual_volatility,
+      max_position_ratio: record.position_ratio,
     }
     view.value = 'backtest'
     if (['queued', 'running'].includes(backtestResult.value.status)) schedulePoll(runId)
@@ -412,8 +418,11 @@ async function submitBacktest() {
   try {
     const symbols = form.strategy_code === 'momentum_rotation' ? rotationSymbols.value : [form.symbol]
     const parameters = { ...currentStrategyParameters.value }
+    // 防御策略把目录中的最大仓位映射到回测合同沿用的 position_ratio。
+    const positionRatio = form.strategy_code === 'defensive_mean_reversion'
+      ? parameters.max_position_ratio ?? form.position_ratio : form.position_ratio
     const accepted = await api.submitBacktest({
-      ...form, symbol: symbols[0], symbols, parameters,
+      ...form, symbol: symbols[0], symbols, position_ratio: positionRatio, parameters,
     })
     activeRunId.value = accepted.run_id
     backtestResult.value = {
@@ -434,6 +443,9 @@ async function submitBacktest() {
       trend_ma_period: parameters.trend_ma_period ?? 60,
       max_positions: parameters.max_positions ?? 3,
       rebalance_interval_days: parameters.rebalance_interval_days ?? 7,
+      max_holding_days: parameters.max_holding_days ?? 5,
+      cooldown_days: parameters.cooldown_days ?? 3,
+      target_annual_volatility: parameters.target_annual_volatility ?? 0.15,
       status: accepted.status,
       progress: 0,
       total_return: null,
@@ -441,7 +453,7 @@ async function submitBacktest() {
       max_drawdown: null,
       created_at: new Date().toISOString(),
       initial_capital: form.initial_capital,
-      position_ratio: form.position_ratio,
+      position_ratio: positionRatio,
       commission_rate: form.commission_rate,
       minimum_commission: form.minimum_commission,
       stamp_duty_rate: form.stamp_duty_rate,
@@ -578,6 +590,7 @@ onBeforeUnmount(() => {
         <button :class="{ active: view === 'history' }" @click="setView('history')"><span>04</span> 回测档案</button>
         <button :class="{ active: view === 'fund-market' }" @click="setView('fund-market')"><span>05</span> 基金行情</button>
         <button :class="{ active: view === 'fund-paper' }" @click="setView('fund-paper')"><span>06</span> 基金实验</button>
+        <button :class="{ active: view === 'stock-screen' }" @click="setView('stock-screen')"><span>07</span> 选股实验</button>
       </nav>
       <div class="topbar-status">
         <span class="live-dot"></span>
@@ -618,8 +631,8 @@ onBeforeUnmount(() => {
 
         <section class="panel chart-panel intraday-panel">
           <div class="panel-heading">
-            <div><span class="eyebrow">TODAY · 1 MINUTE</span><h3>当日分时行情</h3></div>
-            <div class="chart-range"><span class="range-dot"></span>{{ intradayLatestLabel }}<span v-if="intradayError" class="intraday-warning">{{ intradayError }}</span></div>
+            <div><span class="eyebrow">{{ intradayLabels.eyebrow }}</span><h3>分时行情</h3></div>
+            <div class="chart-range"><span class="range-dot"></span>{{ intradayLabels.latest }}<span v-if="intradayError" class="intraday-warning">{{ intradayError }}</span></div>
           </div>
           <IntradayChart
             :bars="intradayBars"
@@ -698,7 +711,7 @@ onBeforeUnmount(() => {
               </div>
               <div class="form-row">
                 <label class="form-field"><span>初始资金</span><div class="number-field prefix"><small>¥</small><input v-model.number="form.initial_capital" type="number" min="1000" step="1000" required /></div></label>
-                <label class="form-field"><span>仓位比例</span><div class="number-field"><input v-model.number="form.position_ratio" type="number" min="0.01" max="1" step="0.05" required /><small>比例</small></div></label>
+                <label v-if="form.strategy_code !== 'defensive_mean_reversion'" class="form-field"><span>仓位比例</span><div class="number-field"><input v-model.number="form.position_ratio" type="number" min="0.01" max="1" step="0.05" required /><small>比例</small></div></label>
               </div>
 
               <details class="fee-details">
@@ -741,7 +754,7 @@ onBeforeUnmount(() => {
                 <div class="metric-cell"><span>最大回撤</span><b class="down">{{ percent(backtestResult?.max_drawdown) }}</b><small>峰值至谷值</small></div>
                 <div class="metric-cell"><span>夏普比率</span><b>{{ backtestResult?.sharpe_ratio?.toFixed(2) ?? '—' }}</b><small>日收益年化</small></div>
                 <div class="metric-cell"><span>胜率</span><b>{{ percent(backtestResult?.win_rate) }}</b><small>{{ backtestResult?.closed_trade_count ?? 0 }} 笔已平仓</small></div>
-                <div class="metric-cell"><span>基准收益</span><b>{{ percent(backtestResult?.benchmark_return) }}</b><small>{{ backtestResult?.strategy_code === 'momentum_rotation' ? '股票池等权买入持有' : '买入持有' }}</small></div>
+                <div class="metric-cell"><span>基准收益</span><b>{{ percent(backtestResult?.benchmark_return) }}</b><small>{{ benchmarkName(backtestResult?.strategy_code) }}</small></div>
                 <div class="metric-cell"><span>年化波动</span><b>{{ percent(backtestResult?.annualized_volatility) }}</b><small>日收益年化</small></div>
                 <div class="metric-cell"><span>累计费用</span><b>{{ amount(backtestResult?.fees_total) }}</b><small>佣金与印花税</small></div>
               </div>
@@ -784,6 +797,14 @@ onBeforeUnmount(() => {
         <FundExperimentCenter
           :refresh-interval-seconds="config?.fund.worker_interval_seconds ?? 60"
           :initial-capital="config?.fund.default_initial_capital ?? 100000"
+        />
+      </template>
+
+      <template v-else-if="view === 'stock-screen'">
+        <StockScreenCenter
+          :default-universe-size="config?.stock_screen.default_universe_size ?? 500"
+          :max-universe-size="config?.stock_screen.max_universe_size ?? 2000"
+          :candidate-count="config?.stock_screen.candidate_count ?? 20"
         />
       </template>
 

@@ -68,6 +68,9 @@ class BacktestManager:
                 history_window = max(params.trend_ma_period, params.momentum_period_days + 1)
             elif params.strategy_code == "breakout_ma_atr":
                 history_window = max(params.ma_period, params.breakout_period, params.atr_period + 1)
+            elif params.strategy_code == "defensive_mean_reversion":
+                # 日历天预热窗口沿用行情层换算约定，覆盖趋势斜率、波动率及 ATR 所需交易日。
+                history_window = max(params.trend_ma_period + 20, 21, params.atr_period + 1)
             else:
                 history_window = params.long_window
             bars_by_symbol = {}

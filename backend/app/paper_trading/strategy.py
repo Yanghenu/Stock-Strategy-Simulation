@@ -1,9 +1,29 @@
 """趋势过滤、区间突破与波动止损等纯策略计算。"""
 
+from dataclasses import dataclass
+from datetime import date
+from math import isfinite, sqrt
+
 from app.models import Bar
 
 
 _STRATEGIES: tuple[dict[str, object], ...] = (
+    {
+        "code": "defensive_mean_reversion", "name": "防御型均值回归",
+        "description": "长期趋势有效时交易短期超跌，按波动率控制仓位并设置 ATR 与持有期退出。",
+        "ma_period": 60, "breakout_period": 20, "atr_period": 14, "atr_multiplier": 2.0,
+        "short_ma_period": 5, "long_ma_period": 20, "trend_ma_period": 120,
+        "max_holding_days": 5, "cooldown_days": 3, "target_annual_volatility": 0.15,
+        "max_position_ratio": 0.70,
+        "parameters": [
+            {"key": "trend_ma_period", "label": "长期趋势均线", "type": "integer", "default": 120, "min": 21, "max": 250, "step": 1, "unit": "日", "description": "收盘价须高于该均线，且均线不得较 20 个交易日前走弱。"},
+            {"key": "atr_multiplier", "label": "ATR 止损倍数", "type": "number", "default": 2.0, "min": 0.1, "max": 10.0, "step": 0.1, "unit": "倍", "description": "收盘跌破入场价减去入场 ATR 乘数时退出。"},
+            {"key": "max_holding_days", "label": "最大持有期", "type": "integer", "default": 5, "min": 1, "max": 120, "step": 1, "unit": "交易日", "description": "持仓达到该交易日数仍未回归时退出。"},
+            {"key": "cooldown_days", "label": "卖出后冷却期", "type": "integer", "default": 3, "min": 0, "max": 120, "step": 1, "unit": "交易日", "description": "卖出后完整等待的交易日数。"},
+            {"key": "target_annual_volatility", "label": "目标年化波动率", "type": "number", "default": 0.15, "min": 0.01, "max": 2.0, "step": 0.01, "unit": "比例", "description": "小数比例，例如 0.15 表示 15%。"},
+            {"key": "max_position_ratio", "label": "最大仓位", "type": "number", "default": 0.70, "min": 0.01, "max": 1.0, "step": 0.01, "unit": "比例", "description": "小数比例，例如 0.70 表示 70%。"},
+        ],
+    },
     {
         "code": "breakout_ma_atr",
         "name": "趋势突破 + ATR 止损",
@@ -54,6 +74,93 @@ _STRATEGIES: tuple[dict[str, object], ...] = (
         ],
     },
 )
+
+
+@dataclass(frozen=True)
+class DefensiveDecision:
+    """防御策略在信号日收盘后生成的决策，不包含盘中成交报价。"""
+    action: str | None
+    reason: str
+    entry_atr: float | None = None
+    position_ratio: float | None = None
+
+
+def _rsi(closes: list[float], period: int = 2) -> float:
+    """按固定窗口平均涨跌幅计算 RSI，避免嵌套条件表达式掩盖边界。"""
+    changes = [closes[i] - closes[i - 1] for i in range(len(closes) - period, len(closes))]
+    gains = sum(max(change, 0) for change in changes) / period
+    losses = sum(max(-change, 0) for change in changes) / period
+    if losses == 0:
+        return 50.0 if gains == 0 else 100.0
+    return 100.0 - 100.0 / (1.0 + gains / losses)
+
+
+def evaluate_defensive_mean_reversion(
+    signal_bars: list[Bar], entry_date: date | None, entry_price: float | None,
+    entry_atr: float | None, last_exit_date: date | None, trend_ma_period: int,
+    atr_period: int, atr_multiplier: float, max_holding_days: int, cooldown_days: int,
+    target_annual_volatility: float, max_position_ratio: float,
+) -> DefensiveDecision:
+    """仅以完整收盘日线和持仓状态计算防御策略决策。"""
+    if (trend_ma_period <= 20 or atr_period <= 0 or max_holding_days <= 0 or cooldown_days < 0
+            or any(not isfinite(v) or v <= 0 for v in (atr_multiplier, target_annual_volatility, max_position_ratio))
+            or max_position_ratio > 1 or not signal_bars):
+        return DefensiveDecision(None, "invalid_parameters_or_history")
+    if any(not all(isfinite(v) and v > 0 for v in (b.open, b.high, b.low, b.close))
+           or b.high < max(b.open, b.close) or b.low > min(b.open, b.close) for b in signal_bars):
+        return DefensiveDecision(None, "invalid_daily_bars")
+    if len({bar.trade_date for bar in signal_bars}) != len(signal_bars):
+        return DefensiveDecision(None, "duplicate_trade_dates")
+    bars = sorted(signal_bars, key=lambda bar: bar.trade_date)
+    if len(bars) < max(trend_ma_period + 20, 21, atr_period + 1):
+        return DefensiveDecision(None, "insufficient_history")
+    closes = [bar.close for bar in bars]
+    close = closes[-1]
+    trend = sum(closes[-trend_ma_period:]) / trend_ma_period
+    prior = sum(closes[-trend_ma_period-20:-20]) / trend_ma_period
+    trend_ok = close > trend and trend >= prior
+    # ATR 采用原始 OHLC 的简单平均真实波幅，包含相邻交易日跳空。
+    trs = [max(bars[i].high-bars[i].low, abs(bars[i].high-closes[i-1]),
+               abs(bars[i].low-closes[i-1])) for i in range(len(bars)-atr_period, len(bars))]
+    current_atr = sum(trs) / atr_period
+    if not isfinite(current_atr) or current_atr <= 0:
+        return DefensiveDecision(None, "invalid_atr")
+
+    if entry_date is not None:
+        if (entry_price is None or entry_atr is None or not isfinite(entry_price)
+                or not isfinite(entry_atr) or entry_price <= 0 or entry_atr <= 0):
+            return DefensiveDecision(None, "invalid_position")
+        rsi2 = _rsi(closes)
+        held = sum(entry_date < bar.trade_date <= bars[-1].trade_date for bar in bars)
+        if not trend_ok:
+            return DefensiveDecision("sell", "trend_filter_failed")
+        if close <= entry_price - atr_multiplier * entry_atr:
+            return DefensiveDecision("sell", "atr_stop")
+        if held >= max_holding_days:
+            return DefensiveDecision("sell", "maximum_holding_period")
+        if close >= sum(closes[-5:])/5 or rsi2 >= 60:
+            return DefensiveDecision("sell", "mean_reversion")
+        return DefensiveDecision(None, "hold")
+
+    if last_exit_date is not None:
+        exit_index = next((i for i in range(len(bars)-1, -1, -1) if bars[i].trade_date == last_exit_date), None)
+        if exit_index is None or len(bars)-1-exit_index <= cooldown_days:
+            return DefensiveDecision(None, "cooldown")
+    if not trend_ok:
+        return DefensiveDecision(None, "trend_filter_failed")
+    rsi2 = _rsi(closes)
+    window = closes[-20:]
+    mean = sum(window)/20
+    lower = mean - 2*sqrt(sum((v-mean)**2 for v in window)/20)
+    if close >= lower or rsi2 > 10:
+        return DefensiveDecision(None, "no_oversold_signal")
+    returns = [closes[i]/closes[i-1]-1 for i in range(len(closes)-20, len(closes))]
+    average = sum(returns)/20
+    volatility = sqrt(sum((v-average)**2 for v in returns)/20)*sqrt(252)
+    if not isfinite(volatility) or volatility <= 0:
+        return DefensiveDecision(None, "invalid_volatility")
+    return DefensiveDecision("buy", "oversold_mean_reversion", current_atr,
+                             min(max_position_ratio, target_annual_volatility/volatility))
 
 
 def get_strategy_catalog() -> list[dict[str, object]]:

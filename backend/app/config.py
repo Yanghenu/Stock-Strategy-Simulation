@@ -80,6 +80,18 @@ class FundSettings:
 
 
 @dataclass(frozen=True)
+class StockScreenSettings:
+    """全市场扫描的有界工作量和研究阈值；与纸面交易刷新配置独立。"""
+
+    default_universe_size: int = 500
+    max_universe_size: int = 2000
+    minimum_turnover: float = 10000000
+    candidate_count: int = 20
+    request_gap_seconds: float = 0.3
+    worker_interval_seconds: int = 300
+
+
+@dataclass(frozen=True)
 class Settings:
     database: DatabaseSettings
     redis: RedisSettings
@@ -89,6 +101,7 @@ class Settings:
     api_port: int = 8000
     paper_trading: PaperTradingSettings = field(default_factory=PaperTradingSettings)
     fund: FundSettings = field(default_factory=FundSettings)
+    stock_screen: StockScreenSettings = field(default_factory=StockScreenSettings)
 
 
 def _positive(section: configparser.SectionProxy, key: str, integer: bool = True) -> int | float:
@@ -226,6 +239,28 @@ def load_settings(path: str | Path | None = None) -> Settings:
     if fund_settings.open_nav_refresh_interval_seconds < 60:
         raise ValueError("开放式基金净值刷新间隔不能小于 60 秒")
 
+    # 新区段可选，已有 config.ini / Docker 配置不需要迁移即可按默认值启动。
+    screen = parser["stock_screen"] if "stock_screen" in parser else None
+    screen_defaults = StockScreenSettings()
+    screen_settings = StockScreenSettings(
+        default_universe_size=screen.getint("default_universe_size", fallback=screen_defaults.default_universe_size) if screen else screen_defaults.default_universe_size,
+        max_universe_size=screen.getint("max_universe_size", fallback=screen_defaults.max_universe_size) if screen else screen_defaults.max_universe_size,
+        minimum_turnover=screen.getfloat("minimum_turnover", fallback=screen_defaults.minimum_turnover) if screen else screen_defaults.minimum_turnover,
+        candidate_count=screen.getint("candidate_count", fallback=screen_defaults.candidate_count) if screen else screen_defaults.candidate_count,
+        request_gap_seconds=screen.getfloat("request_gap_seconds", fallback=screen_defaults.request_gap_seconds) if screen else screen_defaults.request_gap_seconds,
+        worker_interval_seconds=screen.getint("worker_interval_seconds", fallback=screen_defaults.worker_interval_seconds) if screen else screen_defaults.worker_interval_seconds,
+    )
+    if not (1 <= screen_settings.default_universe_size <= screen_settings.max_universe_size <= 3000):
+        raise ValueError("stock_screen 股票池数量无效")
+    if not (1 <= screen_settings.candidate_count <= screen_settings.default_universe_size):
+        raise ValueError("stock_screen 候选股票数量无效")
+    if not (math.isfinite(screen_settings.minimum_turnover) and screen_settings.minimum_turnover > 0):
+        raise ValueError("stock_screen 最低成交额必须为正数")
+    if not (math.isfinite(screen_settings.request_gap_seconds) and 0 <= screen_settings.request_gap_seconds <= 60):
+        raise ValueError("stock_screen 请求间隔必须在 0 到 60 秒之间")
+    if screen_settings.worker_interval_seconds < 30:
+        raise ValueError("stock_screen worker 间隔不能小于 30 秒")
+
     retries = market.getint("max_retries")
     if retries < 0 or retries > 10:
         raise ValueError("market_data.max_retries 必须在 0 到 10 之间")
@@ -260,6 +295,7 @@ def load_settings(path: str | Path | None = None) -> Settings:
         api_port=api_port,
         paper_trading=paper_settings,
         fund=fund_settings,
+        stock_screen=screen_settings,
     )
 
 
@@ -297,5 +333,10 @@ def public_config(settings: Settings) -> dict[str, object]:
             "slippage_rate": settings.fund.slippage_rate,
             "subscription_fee_rate": settings.fund.subscription_fee_rate,
             "redemption_fee_rate": settings.fund.redemption_fee_rate,
+        },
+        "stock_screen": {
+            "default_universe_size": settings.stock_screen.default_universe_size,
+            "max_universe_size": settings.stock_screen.max_universe_size,
+            "candidate_count": settings.stock_screen.candidate_count,
         },
     }

@@ -108,9 +108,21 @@ BEGIN
         error_message NVARCHAR(500) NULL,
         created_at DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
         updated_at DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+        -- 防御型策略独立参数及日期状态，旧记录使用兼容默认值。
+        max_holding_days INT NOT NULL CONSTRAINT DF_backtest_runs_max_holding_days DEFAULT 5,
+        cooldown_days INT NOT NULL CONSTRAINT DF_backtest_runs_cooldown_days DEFAULT 3,
+        target_annual_volatility DECIMAL(19,8) NOT NULL CONSTRAINT DF_backtest_runs_target_annual_volatility DEFAULT 0.15,
         CONSTRAINT FK_backtest_runs_stocks FOREIGN KEY (symbol) REFERENCES dbo.stocks(symbol)
     );
 END;
+
+-- 仅补充缺失列，可重复执行；不改变已持久化的任务参数和状态。
+IF COL_LENGTH(N'dbo.backtest_runs', N'max_holding_days') IS NULL
+    ALTER TABLE dbo.backtest_runs ADD max_holding_days INT NOT NULL CONSTRAINT DF_backtest_runs_max_holding_days DEFAULT 5 WITH VALUES;
+IF COL_LENGTH(N'dbo.backtest_runs', N'cooldown_days') IS NULL
+    ALTER TABLE dbo.backtest_runs ADD cooldown_days INT NOT NULL CONSTRAINT DF_backtest_runs_cooldown_days DEFAULT 3 WITH VALUES;
+IF COL_LENGTH(N'dbo.backtest_runs', N'target_annual_volatility') IS NULL
+    ALTER TABLE dbo.backtest_runs ADD target_annual_volatility DECIMAL(19,8) NOT NULL CONSTRAINT DF_backtest_runs_target_annual_volatility DEFAULT 0.15 WITH VALUES;
 
 /* 旧回测数据按原参数保留；新增策略参数只在回测表追加独立数值列。 */
 IF COL_LENGTH(N'dbo.backtest_runs', N'ma_period') IS NULL
@@ -221,9 +233,24 @@ BEGIN
         last_rebalanced_at DATETIME2 NULL,
         error_message NVARCHAR(500) NULL,
         created_at DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+        -- 防御型策略独立参数及日期状态，旧记录使用兼容默认值。
+        max_holding_days INT NOT NULL CONSTRAINT DF_paper_sessions_max_holding_days DEFAULT 5,
+        cooldown_days INT NOT NULL CONSTRAINT DF_paper_sessions_cooldown_days DEFAULT 3,
+        target_annual_volatility DECIMAL(19,8) NOT NULL CONSTRAINT DF_paper_sessions_target_annual_volatility DEFAULT 0.15,
+        max_position_ratio DECIMAL(19,8) NOT NULL CONSTRAINT DF_paper_sessions_max_position_ratio DEFAULT 0.7,
         CONSTRAINT CK_paper_sessions_status CHECK (status IN ('running', 'completed', 'failed', 'stopped'))
     );
 END;
+
+-- 仅补充缺失列，可重复执行；不改变已持久化的任务参数和状态。
+IF COL_LENGTH(N'dbo.paper_sessions', N'max_holding_days') IS NULL
+    ALTER TABLE dbo.paper_sessions ADD max_holding_days INT NOT NULL CONSTRAINT DF_paper_sessions_max_holding_days DEFAULT 5 WITH VALUES;
+IF COL_LENGTH(N'dbo.paper_sessions', N'cooldown_days') IS NULL
+    ALTER TABLE dbo.paper_sessions ADD cooldown_days INT NOT NULL CONSTRAINT DF_paper_sessions_cooldown_days DEFAULT 3 WITH VALUES;
+IF COL_LENGTH(N'dbo.paper_sessions', N'target_annual_volatility') IS NULL
+    ALTER TABLE dbo.paper_sessions ADD target_annual_volatility DECIMAL(19,8) NOT NULL CONSTRAINT DF_paper_sessions_target_annual_volatility DEFAULT 0.15 WITH VALUES;
+IF COL_LENGTH(N'dbo.paper_sessions', N'max_position_ratio') IS NULL
+    ALTER TABLE dbo.paper_sessions ADD max_position_ratio DECIMAL(19,8) NOT NULL CONSTRAINT DF_paper_sessions_max_position_ratio DEFAULT 0.7 WITH VALUES;
 
 -- 为已有月度实验添加任务字段；默认值回填存量行，不触碰其资金、持仓或账本。
 IF COL_LENGTH(N'dbo.paper_sessions', N'task_name') IS NULL
@@ -285,11 +312,20 @@ BEGIN
         atr_value DECIMAL(19,6) NULL,
         last_price DECIMAL(19,6) NULL,
         last_quote_at DATETIME2 NULL,
+        -- 防御型策略独立参数及日期状态，旧记录使用兼容默认值。
+        last_exit_date DATE NULL,
+        last_decision_date DATE NULL,
         CONSTRAINT PK_paper_session_symbols PRIMARY KEY (session_id, symbol),
         CONSTRAINT FK_paper_session_symbols_sessions FOREIGN KEY (session_id) REFERENCES dbo.paper_sessions(session_id),
         CONSTRAINT FK_paper_session_symbols_stocks FOREIGN KEY (symbol) REFERENCES dbo.stocks(symbol)
     );
 END;
+
+-- 仅补充缺失列，可重复执行；不改变已持久化的任务参数和状态。
+IF COL_LENGTH(N'dbo.paper_session_symbols', N'last_exit_date') IS NULL
+    ALTER TABLE dbo.paper_session_symbols ADD last_exit_date DATE NULL;
+IF COL_LENGTH(N'dbo.paper_session_symbols', N'last_decision_date') IS NULL
+    ALTER TABLE dbo.paper_session_symbols ADD last_decision_date DATE NULL;
 
 IF OBJECT_ID(N'dbo.paper_trades', N'U') IS NULL
 BEGIN
@@ -305,11 +341,17 @@ BEGIN
         commission DECIMAL(19,4) NOT NULL,
         stamp_duty DECIMAL(19,4) NOT NULL,
         reason NVARCHAR(100) NOT NULL,
+        -- 防御型策略独立参数及日期状态，旧记录使用兼容默认值。
+        signal_date DATE NULL,
         CONSTRAINT UQ_paper_trades_quote UNIQUE (session_id, symbol, quote_fetched_at, side),
         CONSTRAINT FK_paper_trades_symbols FOREIGN KEY (session_id, symbol)
             REFERENCES dbo.paper_session_symbols(session_id, symbol)
     );
 END;
+
+-- 仅补充缺失列，可重复执行；不改变已持久化的任务参数和状态。
+IF COL_LENGTH(N'dbo.paper_trades', N'signal_date') IS NULL
+    ALTER TABLE dbo.paper_trades ADD signal_date DATE NULL;
 
 IF OBJECT_ID(N'dbo.paper_equity', N'U') IS NULL
 BEGIN
@@ -544,3 +586,64 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name=N'IX_fund_paper_sessions_sta
     CREATE INDEX IX_fund_paper_sessions_status ON dbo.fund_paper_sessions(status, started_at DESC);
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name=N'IX_fund_paper_trades_session_date' AND object_id=OBJECT_ID(N'dbo.fund_paper_trades'))
     CREATE INDEX IX_fund_paper_trades_session_date ON dbo.fund_paper_trades(session_id, trade_date DESC);
+
+-- 选股研究账本与既有纸面交易表完全独立；不保存 JSON，也不修改既有任务。
+IF OBJECT_ID(N'dbo.stock_screen_runs', N'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.stock_screen_runs (
+        run_id UNIQUEIDENTIFIER NOT NULL PRIMARY KEY,
+        status VARCHAR(12) NOT NULL,
+        signal_cutoff DATE NOT NULL,
+        requested_count INT NOT NULL,
+        candidate_count INT NOT NULL,
+        rule_version VARCHAR(20) NOT NULL,
+        created_at DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+        completed_at DATETIME2 NULL,
+        error_message NVARCHAR(500) NULL,
+        CONSTRAINT CK_stock_screen_runs_status CHECK (status IN ('queued', 'running', 'completed', 'failed', 'cancelled'))
+    );
+END;
+
+IF OBJECT_ID(N'dbo.stock_screen_items', N'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.stock_screen_items (
+        run_id UNIQUEIDENTIFIER NOT NULL,
+        symbol VARCHAR(6) NOT NULL,
+        name NVARCHAR(100) NOT NULL,
+        snapshot_turnover DECIMAL(19,2) NOT NULL,
+        status VARCHAR(12) NOT NULL DEFAULT 'pending',
+        signal_date DATE NULL,
+        signal_close DECIMAL(19,6) NULL,
+        momentum_score DECIMAL(16,8) NULL,
+        recent_5_return DECIMAL(16,8) NULL,
+        reversal_score DECIMAL(16,8) NULL,
+        momentum_rank INT NULL,
+        reversal_rank INT NULL,
+        last_evaluated_date DATE NULL,
+        error_message NVARCHAR(500) NULL,
+        CONSTRAINT PK_stock_screen_items PRIMARY KEY (run_id, symbol),
+        CONSTRAINT FK_stock_screen_items_run FOREIGN KEY (run_id) REFERENCES dbo.stock_screen_runs(run_id),
+        CONSTRAINT CK_stock_screen_items_status CHECK (status IN ('pending', 'eligible', 'excluded', 'error'))
+    );
+END;
+
+IF OBJECT_ID(N'dbo.stock_screen_outcomes', N'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.stock_screen_outcomes (
+        run_id UNIQUEIDENTIFIER NOT NULL,
+        symbol VARCHAR(6) NOT NULL,
+        horizon_days INT NOT NULL,
+        outcome_date DATE NOT NULL,
+        outcome_close DECIMAL(19,6) NOT NULL,
+        return_rate DECIMAL(16,8) NOT NULL,
+        CONSTRAINT PK_stock_screen_outcomes PRIMARY KEY (run_id, symbol, horizon_days),
+        CONSTRAINT FK_stock_screen_outcomes_item FOREIGN KEY (run_id, symbol)
+            REFERENCES dbo.stock_screen_items(run_id, symbol),
+        CONSTRAINT CK_stock_screen_outcomes_horizon CHECK (horizon_days IN (5, 20))
+    );
+END;
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name=N'IX_stock_screen_runs_created' AND object_id=OBJECT_ID(N'dbo.stock_screen_runs'))
+    CREATE INDEX IX_stock_screen_runs_created ON dbo.stock_screen_runs(created_at DESC);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name=N'IX_stock_screen_items_status' AND object_id=OBJECT_ID(N'dbo.stock_screen_items'))
+    CREATE INDEX IX_stock_screen_items_status ON dbo.stock_screen_items(run_id, status, symbol);

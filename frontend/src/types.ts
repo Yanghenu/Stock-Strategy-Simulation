@@ -22,6 +22,11 @@ export interface AppConfig {
     subscription_fee_rate: number
     redemption_fee_rate: number
   }
+  stock_screen: {
+    default_universe_size: number
+    max_universe_size: number
+    candidate_count: number
+  }
   defaults: {
     initial_capital: number
     short_window: number
@@ -31,6 +36,60 @@ export interface AppConfig {
     stamp_duty_rate: number
     slippage_rate: number
   }
+}
+
+/** 07 选股实验的结构化扫描结果；分数是相对排序，不是上涨概率。 */
+export interface StockScreenSummary {
+  run_id: string
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
+  signal_cutoff: string
+  requested_count: number
+  candidate_count: number
+  rule_version: string
+  created_at: string
+  completed_at: string | null
+  error_message: string | null
+  processed_count: number
+  eligible_count: number
+}
+
+export interface StockScreenOutcome {
+  symbol: string
+  horizon_days: 5 | 20
+  outcome_date: string
+  outcome_close: number
+  return_rate: number
+}
+
+export interface StockScreenCandidate {
+  symbol: string
+  name: string
+  snapshot_turnover: number
+  status: string
+  signal_date: string
+  signal_close: number
+  momentum_score: number | null
+  recent_5_return: number | null
+  reversal_score: number | null
+  momentum_rank: number | null
+  reversal_rank: number | null
+  outcomes: StockScreenOutcome[]
+}
+
+export interface StockScreenMetric {
+  strategy_code: 'momentum_trend' | 'relative_reversal'
+  horizon_days: 5 | 20
+  mean_return: number | null
+  benchmark_return: number | null
+  win_rate: number | null
+  sample_count: number
+  benchmark_count: number
+}
+
+export interface StockScreenDetail extends StockScreenSummary {
+  excluded_count: number
+  candidates: StockScreenCandidate[]
+  metrics: StockScreenMetric[]
 }
 
 export interface IntradayBar {
@@ -194,6 +253,9 @@ export interface PaperSymbol {
   atr_value: number | null
   last_price: number | null
   last_quote_at: string | null
+  // 防御策略的冷却起点与去重日期按股票保存，旧账本允许为空。
+  last_exit_date: string | null
+  last_decision_date: string | null
 }
 
 export interface PaperEquityPoint {
@@ -207,6 +269,8 @@ export interface PaperEquityPoint {
 export interface PaperTrade {
   symbol: string
   trade_date: string
+  // 历史纸面成交可能没有保存信号日期；新成交以收盘信号日和报价执行日分开审计。
+  signal_date: string | null
   side: 'buy' | 'sell' | string
   price: number
   quantity: number
@@ -228,6 +292,10 @@ export type PaperStrategyParameterKey =
   | 'trend_ma_period'
   | 'max_positions'
   | 'rebalance_interval_days'
+  | 'max_holding_days'
+  | 'cooldown_days'
+  | 'target_annual_volatility'
+  | 'max_position_ratio'
 
 // 波动率观察期仅属于基金任务，避免该参数扩散到股票回测 DTO。
 export type FundPaperStrategyParameterKey = PaperStrategyParameterKey | 'risk_lookback_days'
@@ -254,6 +322,10 @@ export interface PaperStrategy {
   atr_multiplier: number
   short_ma_period: number
   long_ma_period: number
+  max_holding_days?: number
+  cooldown_days?: number
+  target_annual_volatility?: number
+  max_position_ratio?: number
   parameters: PaperStrategyParameter[]
 }
 
@@ -317,6 +389,10 @@ export interface PaperSession {
   max_positions: number
   rebalance_interval_days: number
   last_rebalanced_at: string | null
+  max_holding_days: number
+  cooldown_days: number
+  target_annual_volatility: number
+  max_position_ratio: number
   commission_rate: number
   minimum_commission: number
   stamp_duty_rate: number
@@ -427,7 +503,11 @@ export interface BacktestRecord extends BacktestSummary {
   trend_ma_period: number
   max_positions: number
   rebalance_interval_days: number
+  max_holding_days: number
+  cooldown_days: number
+  target_annual_volatility: number
   initial_capital: number
+  // 防御策略的 max_position_ratio 落入既有 position_ratio 响应列。
   position_ratio: number
   commission_rate: number
   minimum_commission: number

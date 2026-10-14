@@ -20,6 +20,8 @@ import type {
   PaperStrategy,
   PaperTaskCreateRequest,
   Quote,
+  StockScreenDetail,
+  StockScreenSummary,
   WatchedStock,
 } from '../types'
 
@@ -39,6 +41,14 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 export const api = {
   // 所有路径都走 Vite 的 /api 代理；查询字符串和值统一编码。
   getConfig: () => request<AppConfig>('/api/app-config'),
+  listStockScreens: () => request<StockScreenSummary[]>('/api/stock-screens'),
+  getStockScreen: (runId: string) => request<StockScreenDetail>(`/api/stock-screens/${encodeURIComponent(runId)}`),
+  createStockScreen: (universeSize: number) => request<{ run_id: string; status: string }>('/api/stock-screens', {
+    method: 'POST', body: JSON.stringify({ universe_size: universeSize }),
+  }),
+  cancelStockScreen: (runId: string) => request<{ run_id: string; status: string }>(
+    `/api/stock-screens/${encodeURIComponent(runId)}/cancel`, { method: 'POST' },
+  ),
   searchStocks: (query: string) => request<Quote[]>(`/api/stocks/search?q=${encodeURIComponent(query)}`),
   getQuote: (symbol: string, forceRefresh = false) => request<Quote>(
     `/api/market/quotes/${encodeURIComponent(symbol)}${forceRefresh ? '?force_refresh=true' : ''}`,

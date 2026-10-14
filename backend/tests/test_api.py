@@ -2,14 +2,20 @@ import sys
 import unittest
 from datetime import date, datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.config import BacktestDefaults, DatabaseSettings, MarketDataSettings, RedisSettings, Settings
+from app.api.routes.backtests import _params
+from app.api.routes.paper_trading import create_paper_session
+from app.api.schemas import BacktestRequest, PaperExperimentRequest
 from app.main import create_app
 from app.models import Bar, Quote, WatchedStock
+from app.paper_trading.manager import PaperTradingManager
 from app.paper_trading.strategy import get_strategy_catalog
 
 
@@ -163,6 +169,98 @@ class FakeFundPaperTradingManager:
         pass
 
 
+class PaperExperimentRouteTests(unittest.TestCase):
+    """直接验证股票纸面路由的参数传递，避免 TestClient 生命周期启动阻塞。"""
+
+    def test_defensive_route_passes_catalog_parameters_to_manager(self) -> None:
+        manager = FakePaperTradingManager()
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+            database_ready=True, paper_trading_manager=manager,
+        )))
+        payload = PaperExperimentRequest.model_validate({
+            "task_name": "防御策略", "symbols": ["600000"],
+            "strategy_code": "defensive_mean_reversion", "initial_capital": 100000,
+            "parameters": {
+                "trend_ma_period": 100, "atr_multiplier": 2.5, "max_holding_days": 8,
+                "cooldown_days": 4, "target_annual_volatility": 0.12,
+                "max_position_ratio": 0.6,
+            },
+        })
+
+        response = create_paper_session(payload, request)
+
+        self.assertEqual(response, {"session_id": manager.experiment_session_id, "status": "running"})
+        self.assertEqual(manager.session["strategy_code"], "defensive_mean_reversion")
+        self.assertEqual(manager.created_parameters, payload.parameters)
+
+    def test_defensive_route_rejects_catalog_parameter_outside_range(self) -> None:
+        # 参数范围由真实 manager 的策略目录校验，避免用假管理器模拟业务验证。
+        manager = PaperTradingManager(None, None, app_settings())
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+            database_ready=True, paper_trading_manager=manager,
+        )))
+        payload = PaperExperimentRequest.model_validate({
+            "task_name": "防御策略", "symbols": ["600000"],
+            "strategy_code": "defensive_mean_reversion", "initial_capital": 100000,
+            "parameters": {"max_position_ratio": 1.2},
+        })
+
+        with self.assertRaises(HTTPException) as error:
+            create_paper_session(payload, request)
+
+        self.assertEqual(error.exception.status_code, 422)
+
+
+class BacktestParameterRouteTests(unittest.TestCase):
+    """直接覆盖参数路由 helper，避免依赖 TestClient 的异步 lifespan 启动。"""
+
+    def resolve(self, body: dict[str, object]):
+        # 使用真实模型、策略目录和路由解析，仅替换请求携带的 app.state。
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+            settings=app_settings(), paper_trading_manager=FakePaperTradingManager(),
+        )))
+        return _params(BacktestRequest.model_validate(body), request)
+
+    def test_defensive_parameters_map_to_existing_backtest_fields(self) -> None:
+        params = self.resolve({
+            "symbol": "600000", "strategy_code": "defensive_mean_reversion",
+            "start_date": "2024-01-01", "end_date": "2024-03-01",
+            "parameters": {
+                "trend_ma_period": 100, "atr_multiplier": 2.5,
+                "max_holding_days": 8, "cooldown_days": 4,
+                "target_annual_volatility": 0.12, "max_position_ratio": 0.6,
+            },
+        })
+
+        self.assertEqual(params.position_ratio, 0.6)
+        self.assertEqual(params.max_holding_days, 8)
+        self.assertEqual(params.cooldown_days, 4)
+        self.assertEqual(params.target_annual_volatility, 0.12)
+        self.assertEqual(params.atr_period, 14)
+
+    def test_defensive_route_rejects_each_catalog_parameter_outside_bounds(self) -> None:
+        invalid = [
+            {"trend_ma_period": 20}, {"atr_multiplier": 10.1},
+            {"max_holding_days": 121}, {"cooldown_days": 121},
+            {"target_annual_volatility": 2.1}, {"max_position_ratio": 1.1},
+        ]
+        for parameters in invalid:
+            with self.subTest(parameters=parameters), self.assertRaises(HTTPException):
+                self.resolve({
+                    "symbol": "600000", "strategy_code": "defensive_mean_reversion",
+                    "start_date": "2024-01-01", "end_date": "2024-03-01",
+                    "parameters": parameters,
+                })
+
+    def test_defensive_route_rejects_multiple_symbols(self) -> None:
+        with self.assertRaises(HTTPException):
+            self.resolve({
+                "symbol": "600000", "symbols": ["600000", "000333"],
+                "strategy_code": "defensive_mean_reversion",
+                "start_date": "2024-01-01", "end_date": "2024-03-01",
+            })
+
+
 class ApiTests(unittest.TestCase):
     def setUp(self) -> None:
         self.paper_manager = FakePaperTradingManager()
@@ -251,7 +349,7 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(strategies.status_code, 200)
         self.assertEqual(
             {item["code"] for item in strategies.json()},
-            {"breakout_ma_atr", "dual_ma", "momentum_rotation"},
+            {"breakout_ma_atr", "defensive_mean_reversion", "dual_ma", "momentum_rotation"},
         )
         self.assertEqual(created.status_code, 202)
         self.assertEqual(created.json(), {"session_id": session_id, "status": "running"})
@@ -345,10 +443,46 @@ class ApiTests(unittest.TestCase):
         })
 
         self.assertEqual({item["code"] for item in catalog.json()},
-                         {"breakout_ma_atr", "dual_ma", "momentum_rotation"})
+                         {"breakout_ma_atr", "defensive_mean_reversion", "dual_ma", "momentum_rotation"})
         self.assertEqual(response.status_code, 202)
         self.assertEqual(self.backtest_manager.submitted_params.symbols, ("600000", "000333"))
         self.assertEqual(self.backtest_manager.submitted_params.trend_ma_period, 45)
+
+    def test_defensive_backtest_maps_parameters_and_rejects_multiple_symbols(self) -> None:
+        catalog = self.client.get("/api/backtests/strategies").json()
+        accepted = self.client.post("/api/backtests", json={
+            "symbol": "600000", "strategy_code": "defensive_mean_reversion",
+            "start_date": "2024-01-01", "end_date": "2024-03-01",
+            "parameters": {
+                "trend_ma_period": 100, "atr_multiplier": 2.5,
+                "max_holding_days": 8, "cooldown_days": 4,
+                "target_annual_volatility": 0.12, "max_position_ratio": 0.6,
+            },
+        })
+        multiple = self.client.post("/api/backtests", json={
+            "symbol": "600000", "symbols": ["600000", "000333"],
+            "strategy_code": "defensive_mean_reversion",
+            "start_date": "2024-01-01", "end_date": "2024-03-01",
+        })
+
+        self.assertIn("defensive_mean_reversion", {item["code"] for item in catalog})
+        self.assertEqual(accepted.status_code, 202)
+        params = self.backtest_manager.submitted_params
+        self.assertEqual(params.position_ratio, 0.6)
+        self.assertEqual(params.max_holding_days, 8)
+        self.assertEqual(params.cooldown_days, 4)
+        self.assertEqual(params.target_annual_volatility, 0.12)
+        self.assertEqual(params.atr_period, 14)
+        self.assertEqual(multiple.status_code, 422)
+
+    def test_defensive_backtest_rejects_out_of_range_strategy_parameters(self) -> None:
+        response = self.client.post("/api/backtests", json={
+            "symbol": "600000", "strategy_code": "defensive_mean_reversion",
+            "start_date": "2024-01-01", "end_date": "2024-03-01",
+            "parameters": {"cooldown_days": 121},
+        })
+
+        self.assertEqual(response.status_code, 422)
 
     def test_backtest_rejects_unknown_parameters_and_duplicate_symbols(self) -> None:
         basic = {"symbol": "600000", "strategy_code": "momentum_rotation",

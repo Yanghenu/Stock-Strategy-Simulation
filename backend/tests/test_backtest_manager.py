@@ -60,18 +60,36 @@ class FakeMarketData:
         self.release = threading.Event()
         self.ensure_calls = 0
         self.block = block
+        self.history_windows: list[int] = []
 
     def ensure_stock(self, symbol: str) -> None:
         self.ensure_calls += 1
 
     def get_backtest_inputs(self, symbol: str, start: date, end: date, long_window: int):
         self.started.set()
+        self.history_windows.append(long_window)
         if self.block:
             self.release.wait(2)
         return bars(), [], []
 
 
 class BacktestManagerTests(unittest.TestCase):
+    def test_defensive_strategy_loads_warmup_and_uses_single_stock_engine(self) -> None:
+        repository = FakeRepository()
+        market_data = FakeMarketData()
+        manager = BacktestManager(repository, market_data)
+        run_id = manager.submit(replace(
+            params(), strategy_code="defensive_mean_reversion", trend_ma_period=120,
+            atr_period=14,
+        ))
+
+        self.assertTrue(repository.completed.wait(3))
+        manager.shutdown()
+
+        self.assertEqual(repository.status[run_id], "completed")
+        self.assertEqual(market_data.ensure_calls, 1)
+        self.assertEqual(market_data.history_windows, [140])
+
     def test_rejects_invalid_params_before_creating_a_database_run(self) -> None:
         repository = FakeRepository()
         manager = BacktestManager(repository, FakeMarketData())

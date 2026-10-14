@@ -12,7 +12,8 @@ from uuid import uuid4
 from app.config import Settings
 from app.models import Quote
 from app.paper_trading.strategy import (
-    find_dual_ma_signal, find_entry_atr, get_strategy_catalog, rank_momentum_rotation, should_exit,
+    evaluate_defensive_mean_reversion, find_dual_ma_signal, find_entry_atr,
+    get_strategy_catalog, rank_momentum_rotation, should_exit,
 )
 
 logger = logging.getLogger(__name__)
@@ -92,7 +93,7 @@ class PaperTradingManager:
         self._wake = threading.Event()
         self._lock = threading.RLock()
         self._thread: Thread | None = None
-        self._bars_cache: dict[tuple[str, date], list] = {}
+        self._bars_cache: dict[tuple[str, date, int], list] = {}
 
     def start(self) -> None:
         """在数据库初始化完成后启动单 worker，并恢复运行中的持久会话。"""
@@ -220,6 +221,14 @@ class PaperTradingManager:
             trend_ma_period=int(resolved_parameters.get("trend_ma_period", 60)),
             max_positions=int(resolved_parameters.get("max_positions", 3)),
             rebalance_interval_days=int(resolved_parameters.get("rebalance_interval_days", 7)),
+            max_holding_days=int(resolved_parameters.get("max_holding_days", definition.get("max_holding_days", 5))),
+            cooldown_days=int(resolved_parameters.get("cooldown_days", definition.get("cooldown_days", 3))),
+            target_annual_volatility=float(resolved_parameters.get(
+                "target_annual_volatility", definition.get("target_annual_volatility", 0.15),
+            )),
+            max_position_ratio=float(resolved_parameters.get(
+                "max_position_ratio", definition.get("max_position_ratio", 0.7),
+            )),
         )
         self._wake.set()
         return session_id
@@ -359,13 +368,43 @@ class PaperTradingManager:
                         "highest_price": item["highest_price"],
                         "atr_value": item["atr_value"],
                         "last_price": last_price,
+                        "last_exit_date": item.get("last_exit_date"),
+                        "last_decision_date": item.get("last_decision_date"),
                     }
-                    next_cash, trade = self._decide_trade(session, item, state, cash, last_price, quote_time.date())
+                    decision_date = None
+                    if session["strategy_code"] == "defensive_mean_reversion":
+                        # 防御策略只用前一日及更早的完整日线决定；本次新报价只用于撮合和估值。
+                        signal_bars = [
+                            bar for bar in self._history_before(
+                                symbol, quote_time.date(), history_days=400,
+                            ) if bar.trade_date < quote_time.date()
+                        ]
+                        latest_signal_date = signal_bars[-1].trade_date if signal_bars else None
+                        previous_decision_date = state["last_decision_date"]
+                        if latest_signal_date is not None and (
+                            previous_decision_date is None or latest_signal_date > previous_decision_date
+                        ):
+                            decision_date = latest_signal_date
+                            next_cash, trade = self._decide_trade(
+                                session, item, state, cash, last_price, quote_time.date(), signal_bars,
+                            )
+                        else:
+                            # 同一信号日的后续报价只刷新持仓估值，不再重复评估或下单。
+                            next_cash, trade = cash, None
+                            if state["shares"] > 0:
+                                state["highest_price"] = max(
+                                    float(state["highest_price"] or last_price), last_price,
+                                )
+                    else:
+                        next_cash, trade = self._decide_trade(
+                            session, item, state, cash, last_price, quote_time.date(),
+                        )
                     if self._stop.is_set():
                         break
                     processed_at = _china_time(self._clock())
                     applied = self._repository.apply_paper_quote(
-                        session_id, symbol, quote_time, state, next_cash, trade, processed_at=processed_at,
+                        session_id, symbol, quote_time, state, next_cash, trade,
+                        processed_at=processed_at, decision_date=decision_date,
                     )
                     if not applied and ends_at is not None and processed_at >= _china_time(ends_at):
                         # SQL 仓储在任务锁内已将跨过截止时刻的任务原子结束。
@@ -595,11 +634,12 @@ class PaperTradingManager:
         cash: float,
         last_price: float,
         trade_date: date,
+        signal_bars: list | None = None,
     ) -> tuple[float, dict | None]:
         """按会话持久化的策略周期与费用生成单只股票的成交候选。"""
 
         strategy_code = session["strategy_code"]
-        if strategy_code not in ("breakout_ma_atr", "dual_ma"):
+        if strategy_code not in ("breakout_ma_atr", "dual_ma", "defensive_mean_reversion"):
             raise ValueError("任务包含未知策略代码")
         commission_rate = float(session["commission_rate"])
         minimum_commission = float(session["minimum_commission"])
@@ -608,6 +648,58 @@ class PaperTradingManager:
         entry_date = state["entry_date"]
         next_cash = cash
         trade = None
+
+        if strategy_code == "defensive_mean_reversion":
+            if not signal_bars:
+                return next_cash, None
+            decision = evaluate_defensive_mean_reversion(
+                signal_bars, state["entry_date"], state["entry_price"], state["atr_value"],
+                state["last_exit_date"], int(session["trend_ma_period"]),
+                int(session["atr_period"]), float(session["atr_multiplier"]),
+                int(session["max_holding_days"]), int(session["cooldown_days"]),
+                float(session["target_annual_volatility"]), float(session["max_position_ratio"]),
+            )
+            if state["shares"] > 0:
+                if decision.action != "sell" or entry_date is None or trade_date <= entry_date:
+                    return next_cash, None
+                execution_price = last_price * (1 - slippage_rate)
+                notional = state["shares"] * execution_price
+                commission = _commission(notional, commission_rate, minimum_commission)
+                stamp_duty = notional * stamp_duty_rate
+                next_cash += notional - commission - stamp_duty
+                trade = {
+                    "side": "sell", "quantity": state["shares"], "execution_price": execution_price,
+                    "notional": notional, "commission": commission, "stamp_duty": stamp_duty,
+                    "reason": decision.reason, "signal_date": signal_bars[-1].trade_date,
+                }
+                state.update({
+                    "shares": 0, "entry_date": None, "entry_price": None, "cost_basis": 0,
+                    "highest_price": None, "atr_value": None, "last_exit_date": trade_date,
+                })
+                return next_cash, trade
+
+            if decision.action != "buy" or decision.position_ratio is None or decision.entry_atr is None:
+                return next_cash, None
+            execution_price = last_price * (1 + slippage_rate)
+            # 各股票使用独立的等额上限；未用现金不会转投其他股票，仓位比例作用于可用上限。
+            budget = min(float(item["budget"]), cash) * decision.position_ratio
+            quantity = _buy_quantity(budget, execution_price, commission_rate, minimum_commission)
+            if quantity <= 0:
+                return next_cash, None
+            notional = quantity * execution_price
+            commission = _commission(notional, commission_rate, minimum_commission)
+            next_cash -= notional + commission
+            trade = {
+                "side": "buy", "quantity": quantity, "execution_price": execution_price,
+                "notional": notional, "commission": commission, "stamp_duty": 0,
+                "reason": decision.reason, "signal_date": signal_bars[-1].trade_date,
+            }
+            state.update({
+                "shares": quantity, "entry_date": trade_date, "entry_price": execution_price,
+                "cost_basis": notional + commission, "highest_price": last_price,
+                "atr_value": decision.entry_atr,
+            })
+            return next_cash, trade
 
         if state["shares"] > 0:
             highest = max(float(state["highest_price"] or last_price), last_price)
@@ -678,13 +770,13 @@ class PaperTradingManager:
         })
         return next_cash, trade
 
-    def _history_before(self, symbol: str, current_date: date):
-        """每日最多加载一次预热日线，避免每分钟重复请求 SQL/行情源。"""
+    def _history_before(self, symbol: str, current_date: date, history_days: int = 220):
+        """按股票、日期和范围缓存历史，避免旧短窗口命中防御策略的长预热请求。"""
 
-        cache_key = (symbol, current_date)
+        cache_key = (symbol, current_date, history_days)
         if cache_key not in self._bars_cache:
             self._bars_cache[cache_key] = self._market_data.get_bars(
-                symbol, current_date - timedelta(days=220), current_date - timedelta(days=1),
+                symbol, current_date - timedelta(days=history_days), current_date - timedelta(days=1),
             )
         return self._bars_cache[cache_key]
 

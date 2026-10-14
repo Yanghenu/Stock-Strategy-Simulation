@@ -54,7 +54,12 @@ def _params(payload: BacktestRequest, request: Request) -> BacktestParams:
         short_window=int(resolved.get("short_ma_period", defaults.short_window)),
         long_window=int(resolved.get("long_ma_period", defaults.long_window)),
         initial_capital=payload.initial_capital if payload.initial_capital is not None else defaults.initial_capital,
-        position_ratio=payload.position_ratio,
+        # 防御策略目录的最大仓位复用历史回测既有 position_ratio 字段。
+        position_ratio=(
+            float(resolved.get("max_position_ratio", definition.get("max_position_ratio", 0.70)))
+            if payload.strategy_code == "defensive_mean_reversion"
+            else payload.position_ratio
+        ),
         commission_rate=payload.commission_rate if payload.commission_rate is not None else defaults.commission_rate,
         minimum_commission=payload.minimum_commission if payload.minimum_commission is not None else defaults.minimum_commission,
         stamp_duty_rate=payload.stamp_duty_rate if payload.stamp_duty_rate is not None else defaults.stamp_duty_rate,
@@ -63,12 +68,17 @@ def _params(payload: BacktestRequest, request: Request) -> BacktestParams:
         symbols=symbols,
         ma_period=int(resolved.get("ma_period", 60)),
         breakout_period=int(resolved.get("breakout_period", 20)),
-        atr_period=int(resolved.get("atr_period", 20)),
+        atr_period=int(resolved.get("atr_period", definition.get("atr_period", 20))),
         atr_multiplier=float(resolved.get("atr_multiplier", 2.0)),
         momentum_period_days=int(resolved.get("momentum_period_days", 20)),
         trend_ma_period=int(resolved.get("trend_ma_period", 60)),
         max_positions=int(resolved.get("max_positions", 3)),
         rebalance_interval_days=int(resolved.get("rebalance_interval_days", 7)),
+        max_holding_days=int(resolved.get("max_holding_days", definition.get("max_holding_days", 5))),
+        cooldown_days=int(resolved.get("cooldown_days", definition.get("cooldown_days", 3))),
+        target_annual_volatility=float(
+            resolved.get("target_annual_volatility", definition.get("target_annual_volatility", 0.15))
+        ),
     )
     try:
         validate_backtest_params(params)

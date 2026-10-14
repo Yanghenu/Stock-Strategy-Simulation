@@ -198,6 +198,50 @@ class MarketDataNormalizationTests(unittest.TestCase):
         }])
         self.assertEqual((bars[0].close, bars[0].volume), (9.65, 12300))
 
+    def test_recent_intraday_reads_a_bounded_window_for_closed_days(self) -> None:
+        class Provider:
+            calls: list[dict[str, object]] = []
+
+            def stock_zh_a_hist_min_em(self, **kwargs: object):
+                self.calls.append(kwargs)
+                return [
+                    {"时间": "2026-10-15 15:00:00", "开盘": 10, "最高": 10, "最低": 10, "收盘": 10, "成交量": 1, "成交额": 10},
+                    {"时间": "2026-10-16 15:00:00", "开盘": 11, "最高": 11, "最低": 11, "收盘": 11, "成交量": 1, "成交额": 11},
+                ]
+
+            def stock_zh_a_minute(self, **kwargs: object):
+                raise AssertionError("fallback should not run when the recent range contains bars")
+
+        provider = Provider()
+        source = AKShareSource(MarketDataSettings(5, 0), provider=provider)
+
+        bars = source.fetch_recent_intraday_bars("600000", date(2026, 10, 18))
+
+        self.assertEqual(provider.calls, [{
+            "symbol": "600000", "start_date": "2026-10-04 09:15:00",
+            "end_date": "2026-10-18 15:00:00", "period": "1", "adjust": "",
+        }])
+        self.assertEqual([bar.trade_time.date() for bar in bars], [date(2026, 10, 15), date(2026, 10, 16)])
+
+    def test_intraday_does_not_call_sina_when_eastmoney_has_no_current_day_rows(self) -> None:
+        class Provider:
+            sina_called = False
+
+            def stock_zh_a_hist_min_em(self, **kwargs: object):
+                return []
+
+            def stock_zh_a_minute(self, **kwargs: object):
+                self.sina_called = True
+                return []
+
+        provider = Provider()
+        source = AKShareSource(MarketDataSettings(5, 0), provider=provider)
+
+        bars = source.fetch_intraday_bars("600000", date(2026, 10, 18))
+
+        self.assertEqual(bars, [])
+        self.assertFalse(provider.sina_called)
+
     def test_maps_tencent_snapshot_quote_fields_and_marks_missing_ohlc(self) -> None:
         class Provider:
             def stock_zh_a_spot_tx(self):
